@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Pencil, Trash2 } from 'lucide-react';
+import { BookOpen, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { Story } from '../types/story';
 import { BACKDROP_ART_MAP } from '../data/curatedStories';
 import { getMediaDataUrl } from '../lib/mediaStore';
@@ -9,7 +9,7 @@ interface StoryCardProps {
   isCompleted?: boolean;
   onSelect: (story: Story) => void;
   onEditCustom?: (story: Story) => void;
-  onDeleteCustom?: (story: Story) => void;
+  onDeleteCustom?: (story: Story) => void | Promise<void>;
 }
 
 export function StoryCard({
@@ -23,6 +23,7 @@ export function StoryCard({
     story.coverImageUrl || BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest
   );
   const [imageError, setImageError] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -130,14 +131,25 @@ export function StoryCard({
           {onDeleteCustom && (
             <button
               type="button"
-              onClick={(e) => {
+              disabled={isDeleting}
+              onClick={async (e) => {
                 e.stopPropagation();
-                onDeleteCustom(story);
+                if (isDeleting) return;
+                setIsDeleting(true);
+                try {
+                  await onDeleteCustom(story);
+                } finally {
+                  setIsDeleting(false);
+                }
               }}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
             >
-              <Trash2 className="w-3.5 h-3.5" />
-              Remove
+              {isDeleting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+              {isDeleting ? 'Removing...' : 'Remove'}
             </button>
           )}
         </div>

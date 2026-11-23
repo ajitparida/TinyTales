@@ -32,6 +32,7 @@ import {
   fileToCompressedDataUrl,
   renderRedrawnSvgToWatercolorCanvas,
   renderWatercolorStorybookStyle,
+  yieldToBrowser,
 } from '../lib/watercolorFilter';
 import { getMediaDataUrl, saveMediaDataUrl } from '../lib/mediaStore';
 import { sanitizeId } from '../lib/firebase';
@@ -93,6 +94,51 @@ const BACKDROP_CHOICES: { id: BackdropId; label: string }[] = [
   { id: 'twilight', label: 'Starlit Twilight' },
   { id: 'bridge', label: 'Mossy Bridge' },
 ];
+
+interface UploadProgressState {
+  percent: number;
+  label: string;
+  detail?: string;
+}
+
+function ImageProgressBar({
+  label,
+  percent,
+  detail,
+}: {
+  label: string;
+  percent: number;
+  detail?: string;
+}) {
+  const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+  return (
+    <div className="p-3.5 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#2F7A5E]/30 dark:border-[#E5A94C]/30 space-y-2">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="font-semibold text-[#1E5641] dark:text-[#F4D39B] flex items-center gap-2 min-w-0">
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-[#2F7A5E] dark:text-[#E5A94C]" />
+          <span className="truncate">{label}</span>
+        </span>
+        <span className="font-mono tabular-nums font-semibold text-[#24292E] dark:text-[#EDE9DF] shrink-0">
+          {clamped}%
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-valuenow={clamped}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label}
+        className="h-2 w-full rounded-full bg-[#E6E1D8] dark:bg-[#27304A] overflow-hidden"
+      >
+        <div
+          className="h-full rounded-full bg-[#2F7A5E] dark:bg-[#E5A94C] transition-[width] duration-150 ease-out"
+          style={{ width: `${clamped}%` }}
+        />
+      </div>
+      {detail && <div className="text-[11px] text-[#5C646B] dark:text-[#A4AEC2]">{detail}</div>}
+    </div>
+  );
+}
 
 function createStarterPageDraft(
   index: number,
@@ -427,6 +473,7 @@ export function StoryScanner({
   const [conversionStatus, setConversionStatus] = useState(
     'Reading every printed word and preparing kid-friendly pages...'
   );
+  const [conversionProgress, setConversionProgress] = useState<number>(0);
 
   // Live camera capture modal state
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -451,7 +498,24 @@ export function StoryScanner({
   const [framingPageId, setFramingPageId] = useState<string | null>(null);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [batchProgressText, setBatchProgressText] = useState<string | null>(null);
+  const [batchProgressPercent, setBatchProgressPercent] = useState<number>(0);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSnappingPhoto, setIsSnappingPhoto] = useState(false);
+  const [isAddingCaptureFiles, setIsAddingCaptureFiles] = useState(false);
+  const [isBulkUploadingImages, setIsBulkUploadingImages] = useState(false);
+  const [replacingPageId, setReplacingPageId] = useState<string | null>(null);
+  const [replacingPageProgress, setReplacingPageProgress] = useState<{
+    pageId: string;
+    percent: number;
+    stage: string;
+  } | null>(null);
+  const [isLoadingManualPhotos, setIsLoadingManualPhotos] = useState(false);
+  const [captureUploadProgress, setCaptureUploadProgress] = useState<UploadProgressState | null>(
+    null
+  );
+  const [studioUploadProgress, setStudioUploadProgress] = useState<UploadProgressState | null>(
+    null
+  );
 
   // Manual quick-paste & bulk local image uploader state
   const [showManualPasteBox, setShowManualPasteBox] = useState(
@@ -463,6 +527,7 @@ export function StoryScanner({
   const [showExtraImporter, setShowExtraImporter] = useState(false);
   const [isImportingExtra, setIsImportingExtra] = useState(false);
   const [extraImportStatus, setExtraImportStatus] = useState<string | null>(null);
+  const [extraImportProgress, setExtraImportProgress] = useState<number>(0);
   const [extraAutoIllustrate, setExtraAutoIllustrate] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -589,66 +654,142 @@ export function StoryScanner({
 
   const snapFromLiveCamera = async () => {
     const video = videoRef.current;
-    if (!video || capturedPages.length >= MAX_UPLOAD_BATCH) return;
-    const canvas = document.createElement('canvas');
-    const width = Math.min(video.videoWidth || 1400, 1400);
-    const height = Math.round(((video.videoHeight || 1050) / (video.videoWidth || 1400)) * width);
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, width, height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-    const watercolorUrl =
-      defaultVisualMode === 'watercolor' ? await renderWatercolorStorybookStyle(dataUrl) : null;
+    if (!video || capturedPages.length >= MAX_UPLOAD_BATCH || isSnappingPhoto) return;
+    setIsSnappingPhoto(true);
+    setCaptureUploadProgress({
+      percent: 15,
+      label: 'Capturing snapshot from camera...',
+    });
+    await yieldToBrowser();
 
-    setCapturedPages((prev) => [
-      ...prev,
-      {
-        id: `snap_${Date.now()}_${prev.length + 1}`,
-        originalDataUrl: dataUrl,
-        watercolorDataUrl: watercolorUrl,
-        mimeType: 'image/jpeg',
-        visualMode: defaultVisualMode,
-      },
-    ]);
-    stopCameraStream();
+    try {
+      const canvas = document.createElement('canvas');
+      const width = Math.min(video.videoWidth || 1400, 1400);
+      const height = Math.round(((video.videoHeight || 1050) / (video.videoWidth || 1400)) * width);
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      setCaptureUploadProgress({
+        percent: defaultVisualMode === 'watercolor' ? 50 : 90,
+        label:
+          defaultVisualMode === 'watercolor'
+            ? 'Applying watercolor cotton-paper finish...'
+            : 'Preparing captured photo...',
+      });
+      await yieldToBrowser();
+
+      const watercolorUrl =
+        defaultVisualMode === 'watercolor'
+          ? await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+              setCaptureUploadProgress({
+                percent: 50 + Math.round(pct * 0.5),
+                label: 'Applying watercolor cotton-paper finish...',
+              });
+            })
+          : null;
+
+      setCapturedPages((prev) => [
+        ...prev,
+        {
+          id: `snap_${Date.now()}_${prev.length + 1}`,
+          originalDataUrl: dataUrl,
+          watercolorDataUrl: watercolorUrl,
+          mimeType: 'image/jpeg',
+          visualMode: defaultVisualMode,
+        },
+      ]);
+      stopCameraStream();
+    } finally {
+      setIsSnappingPhoto(false);
+      setCaptureUploadProgress(null);
+    }
   };
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setErrorMsg(null);
-    const files = Array.from(e.target.files || []);
+    const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
+    e.target.value = '';
     if (files.length === 0) return;
 
     const remainingSlots = Math.max(0, MAX_UPLOAD_BATCH - capturedPages.length);
     const batch = files.slice(0, remainingSlots);
-    const newDrafts: CapturedPageDraft[] = [];
+    if (batch.length === 0) return;
 
-    for (let i = 0; i < batch.length; i++) {
-      const file = batch[i];
-      if (!file.type.startsWith('image/')) continue;
-      try {
-        const { dataUrl, mimeType } = await fileToCompressedDataUrl(file);
-        const watercolorUrl =
-          defaultVisualMode === 'watercolor'
-            ? await renderWatercolorStorybookStyle(dataUrl)
-            : null;
-        newDrafts.push({
-          id: `snap_${Date.now()}_${i}`,
-          originalDataUrl: dataUrl,
-          watercolorDataUrl: watercolorUrl,
-          mimeType,
-          visualMode: defaultVisualMode,
-        });
-      } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : 'Could not read image file.');
+    setIsAddingCaptureFiles(true);
+    setCaptureUploadProgress({
+      percent: 4,
+      label: `Uploading photo 1 of ${batch.length}...`,
+      detail: batch[0].name,
+    });
+    // Let the browser paint the progress bar immediately before decoding image files
+    await yieldToBrowser();
+
+    try {
+      const needsWatercolor = defaultVisualMode === 'watercolor';
+      for (let i = 0; i < batch.length; i++) {
+        const file = batch[i];
+        const basePct = (i / batch.length) * 100;
+        const stepSpan = 100 / batch.length;
+        try {
+          setCaptureUploadProgress({
+            percent: Math.max(4, Math.round(basePct + stepSpan * 0.08)),
+            label: `Uploading photo ${i + 1} of ${batch.length}...`,
+            detail: `Compressing ${file.name}`,
+          });
+
+          const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
+            const weight = needsWatercolor ? 0.55 : 0.95;
+            setCaptureUploadProgress({
+              percent: Math.min(99, Math.round(basePct + stepSpan * (pct / 100) * weight)),
+              label: `Uploading photo ${i + 1} of ${batch.length}...`,
+              detail: `Compressing ${file.name}`,
+            });
+          });
+
+          let watercolorUrl: string | null = null;
+          if (needsWatercolor) {
+            setCaptureUploadProgress({
+              percent: Math.min(99, Math.round(basePct + stepSpan * 0.58)),
+              label: `Styling photo ${i + 1} of ${batch.length}...`,
+              detail: 'Applying soft watercolor paper finish',
+            });
+            watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+              setCaptureUploadProgress({
+                percent: Math.min(99, Math.round(basePct + stepSpan * (0.55 + (pct / 100) * 0.45))),
+                label: `Styling photo ${i + 1} of ${batch.length}...`,
+                detail: 'Applying soft watercolor paper finish',
+              });
+            });
+          }
+
+          const draft: CapturedPageDraft = {
+            id: `snap_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
+            originalDataUrl: dataUrl,
+            watercolorDataUrl: watercolorUrl,
+            mimeType,
+            visualMode: defaultVisualMode,
+          };
+
+          // Append each photo as soon as it is ready so the page stays live and responsive
+          setCapturedPages((prev) => [...prev, draft]);
+          await yieldToBrowser();
+        } catch (err) {
+          setErrorMsg(err instanceof Error ? err.message : 'Could not read image file.');
+        }
       }
-    }
 
-    if (newDrafts.length > 0) {
-      setCapturedPages((prev) => [...prev, ...newDrafts]);
+      setCaptureUploadProgress({
+        percent: 100,
+        label: `Added ${batch.length} ${batch.length === 1 ? 'photo' : 'photos'}!`,
+      });
+      await yieldToBrowser();
+    } finally {
+      setIsAddingCaptureFiles(false);
+      setCaptureUploadProgress(null);
     }
-    e.target.value = '';
   };
 
   const toggleCapturedVisualMode = async (id: string, mode: VisualMode) => {
@@ -657,7 +798,21 @@ export function StoryScanner({
 
     let watercolorUrl = target.watercolorDataUrl;
     if (mode === 'watercolor' && !watercolorUrl) {
-      watercolorUrl = await renderWatercolorStorybookStyle(target.originalDataUrl);
+      setCaptureUploadProgress({
+        percent: 15,
+        label: 'Applying watercolor retouch...',
+      });
+      await yieldToBrowser();
+      try {
+        watercolorUrl = await renderWatercolorStorybookStyle(target.originalDataUrl, (pct) => {
+          setCaptureUploadProgress({
+            percent: Math.max(15, pct),
+            label: 'Applying watercolor retouch...',
+          });
+        });
+      } finally {
+        setCaptureUploadProgress(null);
+      }
     }
 
     setCapturedPages((prev) =>
@@ -751,6 +906,7 @@ export function StoryScanner({
   const handleGenerateAllIllustrations = async () => {
     if (isBatchGenerating || reviewedPages.length === 0) return;
     setIsBatchGenerating(true);
+    setBatchProgressPercent(5);
     setErrorMsg(null);
     setStudioBanner(null);
 
@@ -760,13 +916,16 @@ export function StoryScanner({
     try {
       for (let i = 0; i < snapshot.length; i++) {
         const page = snapshot[i];
+        setBatchProgressPercent(Math.max(5, Math.round((i / snapshot.length) * 100)));
         setBatchProgressText(
           `Painting matching ${
             REDRAW_STYLES.find((s) => s.id === defaultRedrawStyle)?.label || 'Watercolor'
           } illustration for Page ${i + 1} of ${snapshot.length}...`
         );
+        await yieldToBrowser();
         await handleRedrawSinglePage(page.id, defaultRedrawStyle, page, i, snapshot.length);
         succeeded++;
+        setBatchProgressPercent(Math.round(((i + 1) / snapshot.length) * 100));
       }
       setStudioBanner(
         `Finished generating fresh matching illustrations across ${succeeded} ${
@@ -776,6 +935,7 @@ export function StoryScanner({
     } finally {
       setIsBatchGenerating(false);
       setBatchProgressText(null);
+      setBatchProgressPercent(0);
     }
   };
 
@@ -789,20 +949,38 @@ export function StoryScanner({
     }
 
     if (mode === 'watercolor' && !target.watercolorDataUrl && target.originalDataUrl) {
-      const watercolorUrl = await renderWatercolorStorybookStyle(target.originalDataUrl);
-      setReviewedPages((prev) =>
-        prev.map((item) =>
-          item.id === pageId
-            ? {
-                ...item,
-                visualMode: 'watercolor',
-                watercolorDataUrl: watercolorUrl,
-                framedOverrideUrl: null,
-                mediaDirty: true,
-              }
-            : item
-        )
-      );
+      setReplacingPageId(pageId);
+      setReplacingPageProgress({
+        pageId,
+        percent: 12,
+        stage: 'Applying watercolor finish...',
+      });
+      await yieldToBrowser();
+      try {
+        const watercolorUrl = await renderWatercolorStorybookStyle(target.originalDataUrl, (pct) => {
+          setReplacingPageProgress({
+            pageId,
+            percent: Math.max(12, pct),
+            stage: 'Applying watercolor finish...',
+          });
+        });
+        setReviewedPages((prev) =>
+          prev.map((item) =>
+            item.id === pageId
+              ? {
+                  ...item,
+                  visualMode: 'watercolor',
+                  watercolorDataUrl: watercolorUrl,
+                  framedOverrideUrl: null,
+                  mediaDirty: true,
+                }
+              : item
+          )
+        );
+      } finally {
+        setReplacingPageId(null);
+        setReplacingPageProgress(null);
+      }
       return;
     }
 
@@ -826,9 +1004,45 @@ export function StoryScanner({
     e.target.value = '';
     if (!file || !targetPageId || !file.type.startsWith('image/')) return;
 
+    setReplacingPageId(targetPageId);
+    setReplacingPageProgress({
+      pageId: targetPageId,
+      percent: 8,
+      stage: 'Reading uploaded image...',
+    });
+    await yieldToBrowser();
+
     try {
-      const { dataUrl, mimeType } = await fileToCompressedDataUrl(file);
-      const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl);
+      const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
+        setReplacingPageProgress({
+          pageId: targetPageId,
+          percent: Math.max(8, Math.round(pct * 0.5)),
+          stage: 'Optimizing image resolution...',
+        });
+      });
+
+      setReplacingPageProgress({
+        pageId: targetPageId,
+        percent: 55,
+        stage: 'Applying watercolor paper finish...',
+      });
+      await yieldToBrowser();
+
+      const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+        setReplacingPageProgress({
+          pageId: targetPageId,
+          percent: Math.min(99, 50 + Math.round(pct * 0.5)),
+          stage: 'Applying watercolor paper finish...',
+        });
+      });
+
+      setReplacingPageProgress({
+        pageId: targetPageId,
+        percent: 100,
+        stage: 'Updating page preview...',
+      });
+      await yieldToBrowser();
+
       setReviewedPages((prev) =>
         prev.map((p) =>
           p.id === targetPageId
@@ -848,6 +1062,9 @@ export function StoryScanner({
       setStudioBanner('Replaced page image — you can resize, crop, or AI redraw it anytime.');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not load replacement image.');
+    } finally {
+      setReplacingPageId(null);
+      setReplacingPageProgress(null);
     }
   };
 
@@ -1004,41 +1221,69 @@ export function StoryScanner({
    * zero server calls) so users can write/paste text manually without losing their photos.
    */
   const handleContinueManuallyWithCapturedPhotos = async () => {
+    if (isLoadingManualPhotos) return;
+    setIsLoadingManualPhotos(true);
     setErrorMsg(null);
-    const manualPages: ReviewedPageDraft[] = [];
+    const total = Math.max(1, capturedPages.length);
+    setCaptureUploadProgress({
+      percent: 6,
+      label: `Preparing ${total} ${total === 1 ? 'photo' : 'photos'} for Manual Studio...`,
+    });
+    await yieldToBrowser();
 
-    for (let i = 0; i < capturedPages.length; i++) {
-      const cap = capturedPages[i];
-      const watercolorUrl =
-        cap.watercolorDataUrl || (await renderWatercolorStorybookStyle(cap.originalDataUrl));
-      const base = createStarterPageDraft(i, defaultRedrawStyle, '');
-      manualPages.push({
-        ...base,
-        visualMode: cap.visualMode === 'photo' ? 'photo' : 'watercolor',
-        originalDataUrl: cap.originalDataUrl,
-        mimeType: cap.mimeType,
-        watercolorDataUrl: watercolorUrl,
-        mediaDirty: true,
-      });
-    }
+    try {
+      const manualPages: ReviewedPageDraft[] = [];
 
-    if (manualPages.length === 0) {
-      manualPages.push(createStarterPageDraft(0, defaultRedrawStyle, ''));
-    }
+      for (let i = 0; i < capturedPages.length; i++) {
+        const cap = capturedPages[i];
+        const basePct = (i / total) * 100;
+        const span = 100 / total;
+        setCaptureUploadProgress({
+          percent: Math.max(6, Math.round(basePct + span * 0.1)),
+          label: `Preparing photo ${i + 1} of ${capturedPages.length} for Manual Studio...`,
+        });
 
-    if (titleHint.trim() && !draftTitle.trim()) {
-      setDraftTitle(titleHint.trim());
+        const watercolorUrl =
+          cap.watercolorDataUrl ||
+          (await renderWatercolorStorybookStyle(cap.originalDataUrl, (pct) => {
+            setCaptureUploadProgress({
+              percent: Math.min(99, Math.round(basePct + span * (pct / 100))),
+              label: `Preparing photo ${i + 1} of ${capturedPages.length} for Manual Studio...`,
+            });
+          }));
+        const base = createStarterPageDraft(i, defaultRedrawStyle, '');
+        manualPages.push({
+          ...base,
+          visualMode: cap.visualMode === 'photo' ? 'photo' : 'watercolor',
+          originalDataUrl: cap.originalDataUrl,
+          mimeType: cap.mimeType,
+          watercolorDataUrl: watercolorUrl,
+          mediaDirty: true,
+        });
+        await yieldToBrowser();
+      }
+
+      if (manualPages.length === 0) {
+        manualPages.push(createStarterPageDraft(0, defaultRedrawStyle, ''));
+      }
+
+      if (titleHint.trim() && !draftTitle.trim()) {
+        setDraftTitle(titleHint.trim());
+      }
+      setReviewedPages(manualPages);
+      setCoverPageIndex(0);
+      setCreateMode('manual');
+      setShowManualPasteBox(true);
+      setStep('review');
+      setStudioBanner(
+        `Loaded ${manualPages.length} ${
+          manualPages.length === 1 ? 'photo' : 'photos'
+        } directly into the Storybook Studio. Type or paste your story text below — no scan server required!`
+      );
+    } finally {
+      setIsLoadingManualPhotos(false);
+      setCaptureUploadProgress(null);
     }
-    setReviewedPages(manualPages);
-    setCoverPageIndex(0);
-    setCreateMode('manual');
-    setShowManualPasteBox(true);
-    setStep('review');
-    setStudioBanner(
-      `Loaded ${manualPages.length} ${
-        manualPages.length === 1 ? 'photo' : 'photos'
-      } directly into the Storybook Studio. Type or paste your story text below — no scan server required!`
-    );
   };
 
   /**
@@ -1089,69 +1334,117 @@ export function StoryScanner({
     e.target.value = '';
     if (files.length === 0) return;
 
-    setErrorMsg(null);
-    const prepared: Array<{ dataUrl: string; mimeType: string; watercolorUrl: string }> = [];
-    for (const file of files.slice(0, MAX_STORY_PAGES)) {
-      try {
-        const { dataUrl, mimeType } = await fileToCompressedDataUrl(file);
-        const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl);
-        prepared.push({ dataUrl, mimeType, watercolorUrl });
-      } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : 'Could not load one of the selected images.');
-      }
-    }
-    if (prepared.length === 0) return;
+    const emptyPageSlots = reviewedPages.filter(
+      (p) => !p.originalDataUrl && !p.redrawnDataUrl
+    ).length;
+    const extraPageSlots = Math.max(0, MAX_STORY_PAGES - reviewedPages.length);
+    const openSlots = emptyPageSlots + extraPageSlots;
 
-    let attachedCount = 0;
-    setReviewedPages((prev) => {
-      const copy = [...prev];
-      let imgCursor = 0;
-
-      // First attach to existing pages that do not have an uploaded photo yet
-      for (let i = 0; i < copy.length && imgCursor < prepared.length; i++) {
-        if (!copy[i].originalDataUrl && !copy[i].redrawnDataUrl) {
-          const img = prepared[imgCursor++];
-          copy[i] = {
-            ...copy[i],
-            originalDataUrl: img.dataUrl,
-            mimeType: img.mimeType,
-            watercolorDataUrl: img.watercolorUrl,
-            framedOverrideUrl: null,
-            visualMode: 'watercolor',
-            mediaDirty: true,
-          };
-          attachedCount++;
-        }
-      }
-
-      // Create additional pages for any remaining uploaded images (up to MAX_STORY_PAGES)
-      while (imgCursor < prepared.length && copy.length < MAX_STORY_PAGES) {
-        const img = prepared[imgCursor++];
-        const base = createStarterPageDraft(copy.length, defaultRedrawStyle, '');
-        copy.push({
-          ...base,
-          originalDataUrl: img.dataUrl,
-          mimeType: img.mimeType,
-          watercolorDataUrl: img.watercolorUrl,
-          visualMode: 'watercolor',
-          mediaDirty: true,
-        });
-        attachedCount++;
-      }
-
-      return copy;
-    });
-
-    if (attachedCount > 0) {
-      setStudioBanner(
-        `Added ${attachedCount} ${
-          attachedCount === 1 ? 'image' : 'images'
-        } directly to your pages with warm watercolor framing. You can switch to Original Photo or Resize & Crop anytime.`
-      );
-    } else {
+    if (openSlots <= 0) {
       setStudioBanner(
         'All existing pages already have images (use "Replace Image" on a specific page to swap it).'
       );
+      return;
+    }
+
+    const batch = files.slice(0, openSlots);
+    setIsBulkUploadingImages(true);
+    setErrorMsg(null);
+    setStudioUploadProgress({
+      percent: 4,
+      label: `Uploading image 1 of ${batch.length}...`,
+      detail: batch[0].name,
+    });
+    await yieldToBrowser();
+
+    try {
+      let attachedCount = 0;
+      for (let i = 0; i < batch.length; i++) {
+        const file = batch[i];
+        const basePct = (i / batch.length) * 100;
+        const stepSpan = 100 / batch.length;
+
+        try {
+          setStudioUploadProgress({
+            percent: Math.max(4, Math.round(basePct + stepSpan * 0.08)),
+            label: `Uploading image ${i + 1} of ${batch.length}...`,
+            detail: `Optimizing ${file.name}`,
+          });
+
+          const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
+            setStudioUploadProgress({
+              percent: Math.min(99, Math.round(basePct + stepSpan * (pct / 100) * 0.5)),
+              label: `Uploading image ${i + 1} of ${batch.length}...`,
+              detail: `Optimizing ${file.name}`,
+            });
+          });
+
+          setStudioUploadProgress({
+            percent: Math.min(99, Math.round(basePct + stepSpan * 0.54)),
+            label: `Styling image ${i + 1} of ${batch.length}...`,
+            detail: 'Applying warm watercolor finish',
+          });
+
+          const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+            setStudioUploadProgress({
+              percent: Math.min(99, Math.round(basePct + stepSpan * (0.5 + (pct / 100) * 0.5))),
+              label: `Styling image ${i + 1} of ${batch.length}...`,
+              detail: 'Applying warm watercolor finish',
+            });
+          });
+
+          // Stream each processed image onto the next open page immediately
+          setReviewedPages((prev) => {
+            const copy = [...prev];
+            const emptyIdx = copy.findIndex((p) => !p.originalDataUrl && !p.redrawnDataUrl);
+            if (emptyIdx >= 0) {
+              copy[emptyIdx] = {
+                ...copy[emptyIdx],
+                originalDataUrl: dataUrl,
+                mimeType,
+                watercolorDataUrl: watercolorUrl,
+                framedOverrideUrl: null,
+                visualMode: 'watercolor',
+                mediaDirty: true,
+              };
+            } else if (copy.length < MAX_STORY_PAGES) {
+              const base = createStarterPageDraft(copy.length, defaultRedrawStyle, '');
+              copy.push({
+                ...base,
+                originalDataUrl: dataUrl,
+                mimeType,
+                watercolorDataUrl: watercolorUrl,
+                visualMode: 'watercolor',
+                mediaDirty: true,
+              });
+            }
+            return copy;
+          });
+          attachedCount++;
+          await yieldToBrowser();
+        } catch (err) {
+          setErrorMsg(
+            err instanceof Error ? err.message : 'Could not load one of the selected images.'
+          );
+        }
+      }
+
+      setStudioUploadProgress({
+        percent: 100,
+        label: 'Images ready!',
+      });
+      await yieldToBrowser();
+
+      if (attachedCount > 0) {
+        setStudioBanner(
+          `Added ${attachedCount} ${
+            attachedCount === 1 ? 'image' : 'images'
+          } directly to your pages with warm watercolor framing. You can switch to Original Photo or Resize & Crop anytime.`
+        );
+      }
+    } finally {
+      setIsBulkUploadingImages(false);
+      setStudioUploadProgress(null);
     }
   };
 
@@ -1172,19 +1465,35 @@ export function StoryScanner({
     const batchFiles = files.slice(0, Math.min(MAX_UPLOAD_BATCH, remainingPageSlots));
     setIsImportingExtra(true);
     setErrorMsg(null);
-    setExtraImportStatus(`Reading ${batchFiles.length} newly added photo(s)...`);
+    setExtraImportProgress(5);
+    setExtraImportStatus(`Uploading ${batchFiles.length} newly added photo(s)...`);
+    await yieldToBrowser();
 
     try {
       const prepared: Array<{ dataUrl: string; mimeType: string; watercolorUrl: string }> = [];
-      for (const file of batchFiles) {
-        const { dataUrl, mimeType } = await fileToCompressedDataUrl(file);
-        const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl);
+      for (let i = 0; i < batchFiles.length; i++) {
+        const file = batchFiles[i];
+        const basePct = 5 + (i / batchFiles.length) * 35;
+        const span = 35 / batchFiles.length;
+        setExtraImportStatus(`Processing photo ${i + 1} of ${batchFiles.length}...`);
+        const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
+          setExtraImportProgress(Math.round(basePct + span * (pct / 100) * 0.5));
+        });
+        const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+          setExtraImportProgress(Math.round(basePct + span * (0.5 + (pct / 100) * 0.5)));
+        });
         prepared.push({ dataUrl, mimeType, watercolorUrl });
+        await yieldToBrowser();
       }
 
-      const compactPagesForApi = await Promise.all(
-        prepared.map((p) => compressDataUrlForApi(p.dataUrl, 1080, 0.74))
-      );
+      setExtraImportProgress(45);
+      setExtraImportStatus(`Scanning text from ${batchFiles.length} photo(s)...`);
+      await yieldToBrowser();
+
+      const compactPagesForApi = [];
+      for (const p of prepared) {
+        compactPagesForApi.push(await compressDataUrlForApi(p.dataUrl, 1080, 0.74));
+      }
 
       const data = await postApiJson<Record<string, unknown>>(
         '/api/stories/scan',
@@ -1201,6 +1510,7 @@ export function StoryScanner({
         },
         'Could not read extra photos.'
       );
+      setExtraImportProgress(65);
 
       const apiPages: Array<Record<string, unknown>> = Array.isArray(data.pages)
         ? data.pages.slice(0, remainingPageSlots)
@@ -1229,6 +1539,9 @@ export function StoryScanner({
         let visualMode: VisualMode = extraAutoIllustrate ? 'redraw' : 'watercolor';
 
         if (extraAutoIllustrate) {
+          setExtraImportProgress(
+            Math.min(98, 65 + Math.round((i / Math.max(1, apiPages.length)) * 33))
+          );
           setExtraImportStatus(
             `Painting matching illustration for imported page ${i + 1} of ${apiPages.length}...`
           );
@@ -1294,6 +1607,7 @@ export function StoryScanner({
         });
       }
 
+      setExtraImportProgress(100);
       setReviewedPages((prev) => [...prev, ...appended].slice(0, MAX_STORY_PAGES));
       setShowExtraImporter(false);
       setStudioBanner(
@@ -1306,6 +1620,7 @@ export function StoryScanner({
     } finally {
       setIsImportingExtra(false);
       setExtraImportStatus(null);
+      setExtraImportProgress(0);
     }
   };
 
@@ -1318,6 +1633,7 @@ export function StoryScanner({
     setErrorMsg(null);
     setStudioBanner(null);
     setStep('converting');
+    setConversionProgress(8);
     setConversionStatus(
       autoSplitPages
         ? 'Reading every printed word and splitting into short kid-friendly pages...'
@@ -1325,11 +1641,16 @@ export function StoryScanner({
           ? 'Reading every printed word from your storybook photos...'
           : 'Reading and adapting storybook text for your child...'
     );
+    await yieldToBrowser();
 
     try {
-      const compactPagesForApi = await Promise.all(
-        capturedPages.map((p) => compressDataUrlForApi(p.originalDataUrl, 1080, 0.74))
-      );
+      const compactPagesForApi = [];
+      for (let i = 0; i < capturedPages.length; i++) {
+        compactPagesForApi.push(
+          await compressDataUrlForApi(capturedPages[i].originalDataUrl, 1080, 0.74)
+        );
+        setConversionProgress(8 + Math.round(((i + 1) / capturedPages.length) * 14));
+      }
 
       const data = await postApiJson<Record<string, unknown>>(
         '/api/stories/scan',
@@ -1383,6 +1704,9 @@ export function StoryScanner({
         }
 
         const shouldPaintAi = cap.visualMode === 'redraw' || defaultVisualMode === 'redraw';
+        setConversionProgress(
+          Math.min(96, 32 + Math.round((i / Math.max(1, apiPages.length)) * 64))
+        );
         setConversionStatus(
           shouldPaintAi
             ? `Painting unique matching illustration for Page ${i + 1} of ${apiPages.length}...`
@@ -1660,11 +1984,16 @@ export function StoryScanner({
             {!isEditMode && step === 'capture' && capturedPages.length > 0 && (
               <button
                 type="button"
+                disabled={isLoadingManualPhotos}
                 onClick={() => void handleContinueManuallyWithCapturedPhotos()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
               >
-                <PenLine className="w-3.5 h-3.5" />
-                Continue Manually with These Photos
+                {isLoadingManualPhotos ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <PenLine className="w-3.5 h-3.5" />
+                )}
+                {isLoadingManualPhotos ? 'Preparing Studio...' : 'Continue Manually with These Photos'}
               </button>
             )}
             <button
@@ -1745,11 +2074,16 @@ export function StoryScanner({
             </button>
             <button
               type="button"
+              disabled={isSnappingPhoto}
               onClick={() => void snapFromLiveCamera()}
-              className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold cursor-pointer"
+              className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
             >
-              <Camera className="w-4 h-4" />
-              Capture Page
+              {isSnappingPhoto ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Camera className="w-4 h-4" />
+              )}
+              {isSnappingPhoto ? 'Capturing...' : 'Capture Page'}
             </button>
           </div>
         </div>
@@ -1959,12 +2293,16 @@ export function StoryScanner({
 
               <button
                 type="button"
-                disabled={capturedPages.length >= MAX_UPLOAD_BATCH}
+                disabled={capturedPages.length >= MAX_UPLOAD_BATCH || isAddingCaptureFiles}
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
-                <Upload className="w-4 h-4" />
-                Upload Photos / Screenshots
+                {isAddingCaptureFiles ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                {isAddingCaptureFiles ? 'Loading Photos...' : 'Upload Photos / Screenshots'}
               </button>
 
               <span className="text-xs text-[#5C646B] dark:text-[#A4AEC2] font-mono tabular-nums">
@@ -1988,6 +2326,16 @@ export function StoryScanner({
                 className="hidden"
               />
             </div>
+
+            {captureUploadProgress && (
+              <div className="mt-4">
+                <ImageProgressBar
+                  label={captureUploadProgress.label}
+                  percent={captureUploadProgress.percent}
+                  detail={captureUploadProgress.detail}
+                />
+              </div>
+            )}
 
             {/* Captured Photos Grid */}
             {capturedPages.length > 0 && (
@@ -2088,16 +2436,22 @@ export function StoryScanner({
               <div className="mt-7 pt-5 border-t border-[#E6E1D8] dark:border-[#2A324B] flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
+                  disabled={isLoadingManualPhotos || isAddingCaptureFiles}
                   onClick={() => void handleContinueManuallyWithCapturedPhotos()}
-                  className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-xs sm:text-sm font-semibold transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <PenLine className="w-4 h-4" />
-                  Skip Scan &amp; Add Text Manually
+                  {isLoadingManualPhotos ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <PenLine className="w-4 h-4" />
+                  )}
+                  {isLoadingManualPhotos ? 'Preparing Studio...' : 'Skip Scan & Add Text Manually'}
                 </button>
                 <button
                   type="button"
+                  disabled={isLoadingManualPhotos || isAddingCaptureFiles}
                   onClick={() => void handleConvertPages()}
-                  className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-xl bg-[#24292E] hover:bg-[#363D44] dark:bg-[#5CA49B] dark:hover:bg-[#4A8F86] text-white dark:text-[#121624] text-sm font-semibold transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-xl bg-[#24292E] hover:bg-[#363D44] dark:bg-[#5CA49B] dark:hover:bg-[#4A8F86] text-white dark:text-[#121624] text-sm font-semibold transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <Sparkles className="w-4 h-4" />
                   {autoSplitPages
@@ -2116,7 +2470,7 @@ export function StoryScanner({
 
       {/* STEP 2: CONVERTING LOADER */}
       {(step === 'converting' || isHydratingEdit) && (
-        <div className="bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-12 text-center">
+        <div className="bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-10 sm:p-12 text-center">
           <Loader2 className="w-10 h-10 text-[#2F7A5E] dark:text-[#E5A94C] animate-spin mx-auto mb-4" />
           <h2 className="font-display text-2xl font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-2">
             {isHydratingEdit
@@ -2126,6 +2480,26 @@ export function StoryScanner({
           <p className="text-sm text-[#5C646B] dark:text-[#A4AEC2] max-w-md mx-auto">
             {isHydratingEdit ? 'Loading pages and high-resolution artwork...' : conversionStatus}
           </p>
+          {!isHydratingEdit && (
+            <div className="max-w-md mx-auto mt-5 space-y-1.5">
+              <div
+                role="progressbar"
+                aria-valuenow={conversionProgress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label={conversionStatus}
+                className="h-2.5 w-full rounded-full bg-[#E6E1D8] dark:bg-[#27304A] overflow-hidden"
+              >
+                <div
+                  className="h-full rounded-full bg-[#2F7A5E] dark:bg-[#E5A94C] transition-[width] duration-200 ease-out"
+                  style={{ width: `${Math.max(6, conversionProgress)}%` }}
+                />
+              </div>
+              <div className="text-xs font-mono tabular-nums font-semibold text-[#5C646B] dark:text-[#A4AEC2]">
+                {Math.max(6, conversionProgress)}%
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2251,11 +2625,16 @@ export function StoryScanner({
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
+                      disabled={isBulkUploadingImages}
                       onClick={() => bulkManualImagesInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                     >
-                      <Images className="w-3.5 h-3.5" />
-                      Upload Page Images
+                      {isBulkUploadingImages ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Images className="w-3.5 h-3.5" />
+                      )}
+                      {isBulkUploadingImages ? 'Adding Images...' : 'Upload Page Images'}
                     </button>
                     <button
                       type="button"
@@ -2316,12 +2695,16 @@ export function StoryScanner({
 
                 <button
                   type="button"
-                  disabled={isBatchGenerating || isImportingExtra}
+                  disabled={isBatchGenerating || isImportingExtra || isBulkUploadingImages}
                   onClick={() => bulkManualImagesInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] disabled:opacity-45 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <Images className="w-3.5 h-3.5" />
-                  Upload Page Images
+                  {isBulkUploadingImages ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Images className="w-3.5 h-3.5" />
+                  )}
+                  {isBulkUploadingImages ? 'Adding Images...' : 'Upload Page Images'}
                 </button>
 
                 <button
@@ -2346,11 +2729,16 @@ export function StoryScanner({
               </div>
             </div>
 
+            {studioUploadProgress && (
+              <ImageProgressBar
+                label={studioUploadProgress.label}
+                percent={studioUploadProgress.percent}
+                detail={studioUploadProgress.detail}
+              />
+            )}
+
             {batchProgressText && (
-              <div className="px-4 py-3 rounded-xl bg-[#2F7A5E]/10 dark:bg-[#E5A94C]/12 border border-[#2F7A5E]/25 dark:border-[#E5A94C]/25 text-xs font-medium text-[#1E5641] dark:text-[#F4D39B] flex items-center gap-2.5">
-                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span>{batchProgressText}</span>
-              </div>
+              <ImageProgressBar label={batchProgressText} percent={batchProgressPercent} />
             )}
 
             {/* Inline Extra Photos Importer Drawer */}
@@ -2415,10 +2803,7 @@ export function StoryScanner({
                 </div>
 
                 {extraImportStatus && (
-                  <p className="text-xs font-medium text-[#2F7A5E] dark:text-[#E5A94C] flex items-center gap-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    {extraImportStatus}
-                  </p>
+                  <ImageProgressBar label={extraImportStatus} percent={extraImportProgress} />
                 )}
               </div>
             )}
@@ -2470,6 +2855,33 @@ export function StoryScanner({
                             <span className="text-xs font-semibold">
                               Painting Page {idx + 1} illustration...
                             </span>
+                          </div>
+                        )}
+
+                        {replacingPageProgress?.pageId === page.id && (
+                          <div className="absolute inset-0 bg-[#121624]/78 backdrop-blur-xs flex flex-col items-center justify-center text-white p-5">
+                            <Loader2 className="w-6 h-6 animate-spin text-[#E5A94C] mb-2.5" />
+                            <div className="w-full max-w-[220px] space-y-1.5">
+                              <div className="flex items-center justify-between gap-2 text-[11px] font-semibold">
+                                <span className="truncate">{replacingPageProgress.stage}</span>
+                                <span className="font-mono tabular-nums shrink-0">
+                                  {replacingPageProgress.percent}%
+                                </span>
+                              </div>
+                              <div
+                                role="progressbar"
+                                aria-valuenow={replacingPageProgress.percent}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-label={replacingPageProgress.stage}
+                                className="h-2 w-full rounded-full bg-white/20 overflow-hidden"
+                              >
+                                <div
+                                  className="h-full rounded-full bg-[#E5A94C] transition-[width] duration-150 ease-out"
+                                  style={{ width: `${replacingPageProgress.percent}%` }}
+                                />
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -2544,12 +2956,18 @@ export function StoryScanner({
                           type="button"
                           disabled={page.isRedrawing || isBatchGenerating}
                           onClick={() => void handleRedrawSinglePage(page.id, page.artStyle)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#24292E] hover:bg-[#363D44] dark:bg-[#27304A] dark:hover:bg-[#333F61] text-white text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#24292E] hover:bg-[#363D44] dark:bg-[#27304A] dark:hover:bg-[#333F61] text-white text-xs font-semibold transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
                         >
-                          <RefreshCw
-                            className={`w-3.5 h-3.5 ${page.isRedrawing ? 'animate-spin' : ''}`}
-                          />
-                          {page.redrawnDataUrl ? 'Redraw Art' : 'Paint AI Art'}
+                          {page.isRedrawing ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                          {page.isRedrawing
+                            ? 'Painting...'
+                            : page.redrawnDataUrl
+                              ? 'Redraw Art'
+                              : 'Paint AI Art'}
                         </button>
                       </div>
 
@@ -2557,9 +2975,9 @@ export function StoryScanner({
                       <div className="grid grid-cols-2 gap-1.5">
                         <button
                           type="button"
-                          disabled={page.isRedrawing}
+                          disabled={page.isRedrawing || replacingPageId === page.id}
                           onClick={() => setFramingPageId(page.id)}
-                          className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] transition-colors disabled:opacity-50 cursor-pointer"
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                         >
                           <Crop className="w-3.5 h-3.5 text-[#2F7A5E] dark:text-[#E5A94C]" />
                           {page.framedOverrideUrl ? 'Adjust Crop' : 'Resize & Crop'}
@@ -2567,12 +2985,20 @@ export function StoryScanner({
 
                         <button
                           type="button"
-                          disabled={page.isRedrawing}
+                          disabled={page.isRedrawing || replacingPageId === page.id}
                           onClick={() => handleTriggerReplacePhoto(page.id)}
-                          className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] transition-colors disabled:opacity-50 cursor-pointer"
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                         >
-                          <Upload className="w-3.5 h-3.5" />
-                          {hasSourcePhoto || page.redrawnDataUrl ? 'Replace Image' : 'Upload Image'}
+                          {replacingPageId === page.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Upload className="w-3.5 h-3.5" />
+                          )}
+                          {replacingPageId === page.id
+                            ? 'Loading...'
+                            : hasSourcePhoto || page.redrawnDataUrl
+                              ? 'Replace Image'
+                              : 'Upload Image'}
                         </button>
                       </div>
 
@@ -2769,11 +3195,17 @@ export function StoryScanner({
 
               <button
                 type="button"
-                disabled={isSaving || isBatchGenerating || isImportingExtra}
+                disabled={isSaving || isBatchGenerating || isImportingExtra || isBulkUploadingImages}
                 onClick={() => void handleSaveConvertedStory()}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
               >
-                {isEditMode ? <Check className="w-4 h-4" /> : <BookPlus className="w-4 h-4" />}
+                {isSaving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : isEditMode ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <BookPlus className="w-4 h-4" />
+                )}
                 {isSaving
                   ? isEditMode
                     ? 'Saving Changes...'

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FAF8F4" />
+      <stop offset="100%" stop-color="#EDE6D8" />
+    </linearGradient>
+    <linearGradient id="cover" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#358A6A" />
+      <stop offset="100%" stop-color="#26684F" />
+    </linearGradient>
+    <linearGradient id="star" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F5C469" />
+      <stop offset="100%" stop-color="#D98A1C" />
+    </linearGradient>
+  </defs>
+
+  <!-- Soft Cotton Paper Rounded Tile -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#bg)" stroke="#D8D1C4" stroke-width="2" />
+
+  <!-- Book Cover Base -->
+  <path
+    d="M11 26.5C11 24.5 12.6 23 14.6 23H29.5C30.9 23 32 24.1 32 25.5C32 24.1 33.1 23 34.5 23H49.4C51.4 23 53 24.5 53 26.5V47.5C53 49.4 51.4 51 49.4 51H35.4C33.8 51 32.5 51.8 32 53C31.5 51.8 30.2 51 28.6 51H14.6C12.6 51 11 49.4 11 47.5V26.5Z"
+    fill="url(#cover)"
+  />
+
+  <!-- Left Open Cream Page -->
+  <path
+    d="M15 26.2C15 25.3 15.7 24.6 16.6 24.6H27.8C29.7 24.6 31.1 25.6 31.6 27.1V48.2C30.7 47.3 29.4 46.8 27.8 46.8H16.6C15.7 46.8 15 46.1 15 45.2V26.2Z"
+    fill="#FFFDF9"
+  />
+
+  <!-- Right Open Cream Page -->
+  <path
+    d="M49 26.2C49 25.3 48.3 24.6 47.4 24.6H36.2C34.3 24.6 32.9 25.6 32.4 27.1V48.2C33.3 47.3 34.6 46.8 36.2 46.8H47.4C48.3 46.8 49 46.1 49 45.2V26.2Z"
+    fill="#FAF6EE"
+  />
+
+  <!-- Gentle Page Lines -->
+  <path d="M18.5 31H28M18.5 35.5H27M18.5 40H25.5" stroke="#D8D1C4" stroke-width="1.8" stroke-linecap="round" />
+  <path d="M36 31H45.5M36 35.5H44.5M36 40H43" stroke="#D8D1C4" stroke-width="1.8" stroke-linecap="round" />
+
+  <!-- Warm Golden Story Star Rising Above Open Book -->
+  <path
+    d="M32 10.5L34.2 15.1L39.2 15.8L35.6 19.3L36.5 24.2L32 21.8L27.5 24.2L28.4 19.3L24.8 15.8L29.8 15.1L32 10.5Z"
+    fill="url(#star)"
+  />
+</svg>

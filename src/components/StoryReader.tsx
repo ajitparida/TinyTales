@@ -224,6 +224,8 @@ export function StoryReader({
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [extraBoost, setExtraBoost] = useState(false);
   const [studioStatus, setStudioStatus] = useState<string | null>(null);
+  const [isSavingVoiceClip, setIsSavingVoiceClip] = useState(false);
+  const [clearingVoiceAction, setClearingVoiceAction] = useState<'page' | 'book' | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
@@ -795,37 +797,54 @@ export function StoryReader({
   };
 
   const handleSavePreviewClip = async () => {
-    if (!previewDataUrl) return;
-    await saveMediaDataUrl(parentVoiceKey(story.id, currentPageKeyId), previewDataUrl);
-    setHasParentRecording(true);
-    setVoiceSource('parent');
-    setPreviewDataUrl(null);
-    setRawCapturedBlob(null);
-    setStudioStatus('Saved clear parent voice for this page.');
+    if (!previewDataUrl || isSavingVoiceClip) return;
+    setIsSavingVoiceClip(true);
+    try {
+      await saveMediaDataUrl(parentVoiceKey(story.id, currentPageKeyId), previewDataUrl);
+      setHasParentRecording(true);
+      setVoiceSource('parent');
+      setPreviewDataUrl(null);
+      setRawCapturedBlob(null);
+      setStudioStatus('Saved clear parent voice for this page.');
+    } finally {
+      setIsSavingVoiceClip(false);
+    }
   };
 
   const clearParentRecording = async () => {
-    stopAudio(true);
-    await deleteMediaKey(parentVoiceKey(story.id, currentPageKeyId));
-    setHasParentRecording(false);
-    setPreviewDataUrl(null);
-    setRawCapturedBlob(null);
-    setVoiceSource('ai');
-    setStudioStatus('Cleared parent voice for this page.');
+    if (clearingVoiceAction) return;
+    setClearingVoiceAction('page');
+    try {
+      stopAudio(true);
+      await deleteMediaKey(parentVoiceKey(story.id, currentPageKeyId));
+      setHasParentRecording(false);
+      setPreviewDataUrl(null);
+      setRawCapturedBlob(null);
+      setVoiceSource('ai');
+      setStudioStatus('Cleared parent voice for this page.');
+    } finally {
+      setClearingVoiceAction(null);
+    }
   };
 
   const clearAllClipsInThisBook = async () => {
-    stopAudio(true);
-    const removed = await clearParentVoicesForStory(story.id);
-    setHasParentRecording(false);
-    setPreviewDataUrl(null);
-    setRawCapturedBlob(null);
-    setVoiceSource('ai');
-    setStudioStatus(
-      removed > 0
-        ? `Cleared ${removed} parent ${removed === 1 ? 'recording' : 'recordings'} from this book.`
-        : 'No saved parent recordings found in this book.'
-    );
+    if (clearingVoiceAction) return;
+    setClearingVoiceAction('book');
+    try {
+      stopAudio(true);
+      const removed = await clearParentVoicesForStory(story.id);
+      setHasParentRecording(false);
+      setPreviewDataUrl(null);
+      setRawCapturedBlob(null);
+      setVoiceSource('ai');
+      setStudioStatus(
+        removed > 0
+          ? `Cleared ${removed} parent ${removed === 1 ? 'recording' : 'recordings'} from this book.`
+          : 'No saved parent recordings found in this book.'
+      );
+    } finally {
+      setClearingVoiceAction(null);
+    }
   };
 
   const reduced = bedtimeSettings.bedtimeEnabled && bedtimeSettings.reducedMotion;
@@ -1008,11 +1027,16 @@ export function StoryReader({
                           </p>
                           <button
                             type="button"
+                            disabled={characterVoiceLoading}
                             onClick={() => void speakCharacterHotspot(activeHotspot)}
-                            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline cursor-pointer"
+                            className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                           >
-                            <Volume2 className="w-3.5 h-3.5" />
-                            Hear again
+                            {characterVoiceLoading ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Volume2 className="w-3.5 h-3.5" />
+                            )}
+                            {characterVoiceLoading ? 'Preparing voice...' : 'Hear again'}
                           </button>
                         </div>
                         <button
@@ -1407,20 +1431,26 @@ export function StoryReader({
                           <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
+                              disabled={isSavingVoiceClip}
                               onClick={() => void handleSavePreviewClip()}
-                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-xs font-semibold cursor-pointer"
+                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                             >
-                              <Check className="w-3.5 h-3.5" />
-                              Save Voice Clip
+                              {isSavingVoiceClip ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Check className="w-3.5 h-3.5" />
+                              )}
+                              {isSavingVoiceClip ? 'Saving...' : 'Save Voice Clip'}
                             </button>
                             <button
                               type="button"
+                              disabled={isSavingVoiceClip}
                               onClick={() => {
                                 setPreviewDataUrl(null);
                                 setRawCapturedBlob(null);
                                 setStudioStatus(null);
                               }}
-                              className="px-2.5 py-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+                              className="px-2.5 py-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] disabled:opacity-50 cursor-pointer"
                             >
                               Discard
                             </button>
@@ -1440,19 +1470,30 @@ export function StoryReader({
                           {hasParentRecording && (
                             <button
                               type="button"
+                              disabled={clearingVoiceAction !== null}
                               onClick={() => void clearParentRecording()}
-                              className="inline-flex items-center gap-1 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] cursor-pointer"
+                              className="inline-flex items-center gap-1 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              Clear This Page
+                              {clearingVoiceAction === 'page' ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                              {clearingVoiceAction === 'page' ? 'Clearing...' : 'Clear This Page'}
                             </button>
                           )}
                           <button
                             type="button"
+                            disabled={clearingVoiceAction !== null}
                             onClick={() => void clearAllClipsInThisBook()}
-                            className="font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] cursor-pointer"
+                            className="inline-flex items-center gap-1 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                           >
-                            Clear All Clips in Book
+                            {clearingVoiceAction === 'book' && (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            )}
+                            {clearingVoiceAction === 'book'
+                              ? 'Clearing...'
+                              : 'Clear All Clips in Book'}
                           </button>
                         </div>
                       )}
@@ -1592,7 +1633,7 @@ export function StoryReader({
                     type="button"
                     onClick={handleToggleNarration}
                     disabled={isLoadingAudio}
-                    className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                    className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
                   >
                     {isLoadingAudio ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
@@ -1601,7 +1642,11 @@ export function StoryReader({
                     ) : (
                       <Play className="w-4 h-4" />
                     )}
-                    {isPlaying ? 'Pause Moral' : 'Listen to Moral'}
+                    {isLoadingAudio
+                      ? 'Preparing Voice...'
+                      : isPlaying
+                        ? 'Pause Moral'
+                        : 'Listen to Moral'}
                   </button>
 
                   <button

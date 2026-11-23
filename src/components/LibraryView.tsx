@@ -21,7 +21,7 @@ interface LibraryViewProps {
   onOpenScanner: () => void;
   onOpenManualCreator: () => void;
   onEditCustomStory: (story: Story) => void;
-  onDeleteCustomStory: (story: Story) => void;
+  onDeleteCustomStory: (story: Story) => void | Promise<void>;
 }
 
 export function LibraryView({

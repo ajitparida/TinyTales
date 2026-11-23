@@ -513,7 +513,7 @@ function MeadowtaleApp() {
               setActiveView('scanner');
             }}
             onEditCustomStory={handleOpenEditCustomStory}
-            onDeleteCustomStory={(story) => void handleDeleteCustomStory(story)}
+            onDeleteCustomStory={handleDeleteCustomStory}
           />
         )}
 

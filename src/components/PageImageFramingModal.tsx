@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  Loader2,
   Maximize2,
   Minimize2,
   Move,
@@ -15,6 +16,7 @@ import {
   ImageFrameSettings,
   renderFramedPageImage,
   renderWatercolorStorybookStyle,
+  yieldToBrowser,
 } from '../lib/watercolorFilter';
 
 interface PageImageFramingModalProps {
@@ -70,6 +72,8 @@ export function PageImageFramingModal({
   const [applyWatercolorOnSave, setApplyWatercolorOnSave] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [applyProgress, setApplyProgress] = useState(0);
+  const [applyStage, setApplyStage] = useState('Cropping & framing image...');
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{
@@ -128,15 +132,33 @@ export function PageImageFramingModal({
   };
 
   const handleApply = async () => {
+    if (isApplying) return;
     setIsApplying(true);
+    setApplyProgress(8);
+    setApplyStage('Cropping & resizing image...');
+    await yieldToBrowser();
+
     try {
-      const framedUrl = await renderFramedPageImage(sourceImageUrl, settings);
-      const finalUrl = applyWatercolorOnSave
-        ? await renderWatercolorStorybookStyle(framedUrl)
-        : framedUrl;
+      const framedUrl = await renderFramedPageImage(sourceImageUrl, settings, (pct) => {
+        const mapped = applyWatercolorOnSave ? Math.round(pct * 0.55) : pct;
+        setApplyProgress(Math.max(8, mapped));
+      });
+
+      let finalUrl = framedUrl;
+      if (applyWatercolorOnSave) {
+        setApplyStage('Applying watercolor cotton-paper finish...');
+        await yieldToBrowser();
+        finalUrl = await renderWatercolorStorybookStyle(framedUrl, (pct) => {
+          setApplyProgress(55 + Math.round(pct * 0.45));
+        });
+      }
+
+      setApplyProgress(100);
+      await yieldToBrowser();
       onApply(finalUrl);
     } finally {
       setIsApplying(false);
+      setApplyProgress(0);
     }
   };
 
@@ -226,6 +248,31 @@ export function PageImageFramingModal({
               <Move className="w-3 h-3" />
               Drag to reposition
             </div>
+
+            {isApplying && (
+              <div className="absolute inset-0 bg-[#121624]/75 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-white">
+                <Loader2 className="w-7 h-7 animate-spin text-[#E5A94C] mb-2.5" />
+                <div className="w-full max-w-xs space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-semibold">
+                    <span>{applyStage}</span>
+                    <span className="font-mono tabular-nums">{applyProgress}%</span>
+                  </div>
+                  <div
+                    role="progressbar"
+                    aria-valuenow={applyProgress}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label={applyStage}
+                    className="h-2 w-full rounded-full bg-white/20 overflow-hidden"
+                  >
+                    <div
+                      className="h-full rounded-full bg-[#E5A94C] transition-[width] duration-150 ease-out"
+                      style={{ width: `${applyProgress}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Quick Screenshot Crop Presets */}
@@ -388,8 +435,9 @@ export function PageImageFramingModal({
             <div className="flex items-center gap-2.5 ml-auto">
               <button
                 type="button"
+                disabled={isApplying}
                 onClick={onCancel}
-                className="px-4 py-2 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] cursor-pointer"
+                className="px-4 py-2 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 Cancel
               </button>
@@ -397,9 +445,13 @@ export function PageImageFramingModal({
                 type="button"
                 disabled={isApplying}
                 onClick={() => void handleApply()}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
               >
-                <Check className="w-4 h-4" />
+                {isApplying ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Check className="w-4 h-4" />
+                )}
                 {isApplying ? 'Applying...' : 'Apply Crop & Frame'}
               </button>
             </div>

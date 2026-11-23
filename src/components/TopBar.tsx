@@ -1,4 +1,5 @@
 import { User } from 'firebase/auth';
+import { Loader2 } from 'lucide-react';
 import { AppView } from '../types/story';
 
 interface TopBarProps {
@@ -88,8 +89,9 @@ export function TopBar({
               type="button"
               onClick={onSignIn}
               disabled={authLoading}
-              className="px-4 py-2 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
             >
+              {authLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               {authLoading ? 'Signing In...' : 'Sign In'}
             </button>
           )}

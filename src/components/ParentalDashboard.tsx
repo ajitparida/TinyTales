@@ -5,6 +5,7 @@ import {
   BookOpen,
   Clock,
   Cloud,
+  Loader2,
   Lock,
   LogOut,
   Mic,
@@ -101,6 +102,8 @@ export function ParentalDashboard({
   // Parent voice clips manager state
   const [parentVoiceCounts, setParentVoiceCounts] = useState<Record<string, number>>({});
   const [voiceManagerNotice, setVoiceManagerNotice] = useState<string | null>(null);
+  const [deletingChildId, setDeletingChildId] = useState<string | null>(null);
+  const [busyVoiceAction, setBusyVoiceAction] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isGateUnlocked) return;
@@ -119,29 +122,57 @@ export function ParentalDashboard({
   );
 
   const handleClearBookVoices = async (storyId: string, title: string) => {
-    const removed = await clearParentVoicesForStory(storyId);
-    const updated = await listParentVoiceSummary();
-    setParentVoiceCounts(updated);
-    setVoiceManagerNotice(`Cleared ${removed} voice clip(s) from “${title}”.`);
+    if (busyVoiceAction) return;
+    setBusyVoiceAction(`book_${storyId}`);
+    try {
+      const removed = await clearParentVoicesForStory(storyId);
+      const updated = await listParentVoiceSummary();
+      setParentVoiceCounts(updated);
+      setVoiceManagerNotice(`Cleared ${removed} voice clip(s) from “${title}”.`);
+    } finally {
+      setBusyVoiceAction(null);
+    }
   };
 
   const handleClearAllParentVoices = async () => {
-    const removed = await clearAllParentVoices();
-    setParentVoiceCounts({});
-    setVoiceManagerNotice(
-      removed > 0
-        ? `Cleared all ${removed} saved parent voice recordings.`
-        : 'No parent voice recordings to clear.'
-    );
+    if (busyVoiceAction) return;
+    setBusyVoiceAction('all_parent');
+    try {
+      const removed = await clearAllParentVoices();
+      setParentVoiceCounts({});
+      setVoiceManagerNotice(
+        removed > 0
+          ? `Cleared all ${removed} saved parent voice recordings.`
+          : 'No parent voice recordings to clear.'
+      );
+    } finally {
+      setBusyVoiceAction(null);
+    }
   };
 
   const handleClearAiCache = async () => {
-    const removed = await clearAllAiVoiceCache();
-    setVoiceManagerNotice(
-      removed > 0
-        ? `Cleared ${removed} cached AI audio files.`
-        : 'AI voice cache is already empty.'
-    );
+    if (busyVoiceAction) return;
+    setBusyVoiceAction('ai_cache');
+    try {
+      const removed = await clearAllAiVoiceCache();
+      setVoiceManagerNotice(
+        removed > 0
+          ? `Cleared ${removed} cached AI audio files.`
+          : 'AI voice cache is already empty.'
+      );
+    } finally {
+      setBusyVoiceAction(null);
+    }
+  };
+
+  const handleRemoveChild = async (childId: string) => {
+    if (deletingChildId) return;
+    setDeletingChildId(childId);
+    try {
+      await onDeleteChild(childId);
+    } finally {
+      setDeletingChildId(null);
+    }
   };
 
   const activeChild =
@@ -302,8 +333,9 @@ export function ParentalDashboard({
                 type="button"
                 disabled={authLoading}
                 onClick={onSignIn}
-                className="ml-2 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-xs font-semibold whitespace-nowrap cursor-pointer"
+                className="ml-2 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-xs font-semibold whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
               >
+                {authLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 {authLoading ? 'Signing in...' : 'Sign In with Google'}
               </button>
             </>
@@ -333,11 +365,16 @@ export function ParentalDashboard({
                   {childrenProfiles.length > 1 && (
                     <button
                       type="button"
-                      onClick={() => void onDeleteChild(child.id)}
+                      disabled={deletingChildId === child.id}
+                      onClick={() => void handleRemoveChild(child.id)}
                       aria-label={`Remove ${child.name}`}
-                      className="p-1.5 text-[#5C646B] hover:text-[#C84B58] cursor-pointer"
+                      className="p-1.5 text-[#5C646B] hover:text-[#C84B58] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      {deletingChildId === child.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
                     </button>
                   )}
                 </div>
@@ -406,10 +443,14 @@ export function ParentalDashboard({
             <button
               type="submit"
               disabled={savingChild}
-              className="inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold cursor-pointer"
+              className="inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
-              Save Profile
+              {savingChild ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Plus className="w-4 h-4" />
+              )}
+              {savingChild ? 'Saving...' : 'Save Profile'}
             </button>
           </form>
         )}
@@ -867,11 +908,16 @@ export function ParentalDashboard({
               {totalParentClips > 0 && (
                 <button
                   type="button"
+                  disabled={busyVoiceAction !== null}
                   onClick={() => void handleClearAllParentVoices()}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#C84B58] dark:text-[#E06D7A] hover:underline cursor-pointer"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#C84B58] dark:text-[#E06D7A] hover:underline disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Clear All Clips
+                  {busyVoiceAction === 'all_parent' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                  {busyVoiceAction === 'all_parent' ? 'Clearing...' : 'Clear All Clips'}
                 </button>
               )}
             </div>
@@ -886,6 +932,7 @@ export function ParentalDashboard({
                 {Object.entries(parentVoiceCounts).map(([storyId, count]) => {
                   const matched = allStories.find((s) => s.id === storyId);
                   const title = matched?.title || storyId;
+                  const isClearingThis = busyVoiceAction === `book_${storyId}`;
                   return (
                     <li
                       key={storyId}
@@ -901,10 +948,12 @@ export function ParentalDashboard({
                       </div>
                       <button
                         type="button"
+                        disabled={busyVoiceAction !== null}
                         onClick={() => void handleClearBookVoices(storyId, title)}
-                        className="px-2.5 py-1 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] hover:border-[#C84B58]/50 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] hover:border-[#C84B58]/50 disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                       >
-                        Clear Book
+                        {isClearingThis && <Loader2 className="w-3 h-3 animate-spin" />}
+                        {isClearingThis ? 'Clearing...' : 'Clear Book'}
                       </button>
                     </li>
                   );
@@ -918,10 +967,12 @@ export function ParentalDashboard({
               </span>
               <button
                 type="button"
+                disabled={busyVoiceAction !== null}
                 onClick={() => void handleClearAiCache()}
-                className="text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline whitespace-nowrap cursor-pointer"
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline whitespace-nowrap disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
               >
-                Clear AI Cache
+                {busyVoiceAction === 'ai_cache' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {busyVoiceAction === 'ai_cache' ? 'Clearing...' : 'Clear AI Cache'}
               </button>
             </div>
           </div>
