@@ -1,0 +1,288 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Parent account profile and customized bedtime preferences scoped to the authenticated parent UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Authenticated parent Firebase UID"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Parent display name shown in Parental Dashboard"
+        },
+        "bedtimeEnabled": {
+          "type": "boolean",
+          "description": "Whether bedtime twilight mode is currently enabled"
+        },
+        "bedtimeDimness": {
+          "type": "number",
+          "description": "Warm dimness scrim intensity from 0 to 60"
+        },
+        "sleepTimerMinutes": {
+          "type": "number",
+          "description": "Sleep timer limit in minutes (0 means off, up to 60)"
+        },
+        "maxStoriesPerSession": {
+          "type": "number",
+          "description": "Maximum stories allowed during a bedtime session (1 to 10)"
+        },
+        "calmVoiceDefault": {
+          "type": "boolean",
+          "description": "Prefer calm soft bedtime voice narration"
+        },
+        "ambientLullaby": {
+          "type": "boolean",
+          "description": "Enable gentle Web Audio lullaby hum in bedtime mode"
+        },
+        "reducedMotion": {
+          "type": "boolean",
+          "description": "Soften animations during bedtime reading"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of account creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last settings update"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "bedtimeEnabled",
+        "bedtimeDimness",
+        "sleepTimerMinutes",
+        "maxStoriesPerSession",
+        "calmVoiceDefault",
+        "ambientLullaby",
+        "reducedMotion",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChildProfile": {
+      "title": "ChildProfile",
+      "description": "Child reader profile (ages 2-3 or 4-5) with reading progress counters.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent Firebase UID"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Child first name or nickname"
+        },
+        "ageGroup": {
+          "type": "string",
+          "enum": ["2-3", "4-5"],
+          "description": "Developmental reading tier"
+        },
+        "avatar": {
+          "type": "string",
+          "enum": ["duck", "bear", "firefly", "fox"],
+          "description": "Woodland animal avatar identifier"
+        },
+        "starsEarned": {
+          "type": "number",
+          "description": "Total moral reading stars earned (0 to 10000)"
+        },
+        "totalMinutesRead": {
+          "type": "number",
+          "description": "Total reading minutes logged (0 to 100000)"
+        },
+        "storiesCompleted": {
+          "type": "number",
+          "description": "Total stories finished (0 to 10000)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "ageGroup",
+        "avatar",
+        "starsEarned",
+        "totalMinutesRead",
+        "storiesCompleted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomStory": {
+      "title": "CustomStory",
+      "description": "Parent-scanned storybook converted into interactive pages with a moral.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "ageGroup": {
+          "type": "string",
+          "enum": ["2-3", "4-5"]
+        },
+        "moralTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "moralLesson": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 360
+        },
+        "parentDiscussionPrompt": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "coverMediaId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "coverFallbackId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "readMinutes": {
+          "type": "number"
+        },
+        "pages": {
+          "type": "array",
+          "description": "Up to 10 structured story pages referencing local mediaIds or curated watercolor art."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "subtitle",
+        "ageGroup",
+        "moralTitle",
+        "moralLesson",
+        "parentDiscussionPrompt",
+        "coverMediaId",
+        "coverFallbackId",
+        "readMinutes",
+        "pages",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReadingLog": {
+      "title": "ReadingLog",
+      "description": "Immutable record of a completed story session and moral learned.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "childId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storyId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storyTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "moralTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "usedBedtimeMode": {
+          "type": "boolean"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "childId",
+        "storyId",
+        "storyTitle",
+        "moralTitle",
+        "durationSeconds",
+        "usedBedtimeMode",
+        "completedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserAccount"
+      },
+      "description": "Parent account and bedtime mode preferences"
+    },
+    "/users/{userId}/children/{childId}": {
+      "schema": {
+        "$ref": "#/entities/ChildProfile"
+      },
+      "description": "Child reader profiles and aggregate reading statistics"
+    },
+    "/users/{userId}/stories/{storyId}": {
+      "schema": {
+        "$ref": "#/entities/CustomStory"
+      },
+      "description": "Parent-scanned custom interactive storybooks with morals"
+    },
+    "/users/{userId}/readingLogs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/ReadingLog"
+      },
+      "description": "Immutable completed reading session history"
+    }
+  }
+}

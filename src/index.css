@@ -1,0 +1,119 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Fraunces", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+:root {
+  --paper-bg: #FAF8F4;
+  --paper-surface: #FFFFFF;
+  --paper-border: #E6E1D8;
+  --ink-primary: #24292E;
+  --ink-muted: #5C646B;
+  --meadow-accent: #2F7A5E;
+  --meadow-accent-hover: #25644C;
+  --marigold-accent: #D98A1C;
+  --berry-accent: #C84B58;
+}
+
+.dark {
+  --paper-bg: #121624;
+  --paper-surface: #1A2033;
+  --paper-border: #2A324B;
+  --ink-primary: #EDE9DF;
+  --ink-muted: #A4AEC2;
+  --meadow-accent: #5CA49B;
+  --meadow-accent-hover: #4A8F86;
+  --marigold-accent: #E5A94C;
+  --berry-accent: #E06D7A;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--paper-bg);
+  color: var(--ink-primary);
+  transition: background-color 280ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark body,
+.dark p,
+.dark span {
+  letter-spacing: 0.01em;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  text-wrap: balance;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Gentle storybook paper texture overlay (subtle, tactile) */
+.watercolor-paper-frame {
+  position: relative;
+  background-image: radial-gradient(
+      rgba(160, 145, 120, 0.06) 1px,
+      transparent 0
+    );
+  background-size: 20px 20px;
+}
+
+.dark .watercolor-paper-frame {
+  background-image: radial-gradient(
+      rgba(229, 169, 76, 0.06) 1px,
+      transparent 0
+    );
+}
+
+@keyframes gentle-float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes ring-ripple {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.85;
+  }
+  70% {
+    transform: scale(1.38);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.38);
+    opacity: 0;
+  }
+}
+
+.animate-gentle-float {
+  animation: gentle-float 3.4s ease-in-out infinite;
+}
+
+.animate-ring-ripple {
+  animation: ring-ripple 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.reduced-motion-mode *,
+.reduced-motion-mode *::before,
+.reduced-motion-mode *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-gentle-float,
+  .animate-ring-ripple {
+    animation: none;
+  }
+}

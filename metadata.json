@@ -1,0 +1,6 @@
+{
+  "name": "Meadowtale",
+  "description": "An interactive warm watercolor picture-book reading app for ages 2-3 and 4-5 with tappable characters, tap-to-play AI and parent voice narration, end-of-story morals, physical storybook scanning, a parental dashboard, and customized bedtime mode.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

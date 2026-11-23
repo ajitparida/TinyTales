@@ -1,0 +1,380 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function parentAccountExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Validation Blueprint: UserAccount
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'bedtimeEnabled',
+          'bedtimeDimness',
+          'sleepTimerMinutes',
+          'maxStoriesPerSession',
+          'calmVoiceDefault',
+          'ambientLullaby',
+          'reducedMotion',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'bedtimeEnabled',
+          'bedtimeDimness',
+          'sleepTimerMinutes',
+          'maxStoriesPerSession',
+          'calmVoiceDefault',
+          'ambientLullaby',
+          'reducedMotion',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.uid == userId
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 100
+        && data.bedtimeEnabled is bool
+        && data.bedtimeDimness is number
+        && data.bedtimeDimness >= 0
+        && data.bedtimeDimness <= 60
+        && data.sleepTimerMinutes is number
+        && data.sleepTimerMinutes >= 0
+        && data.sleepTimerMinutes <= 60
+        && data.maxStoriesPerSession is number
+        && data.maxStoriesPerSession >= 1
+        && data.maxStoriesPerSession <= 10
+        && data.calmVoiceDefault is bool
+        && data.ambientLullaby is bool
+        && data.reducedMotion is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ChildProfile
+    function isValidChildProfile(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'name',
+          'ageGroup',
+          'avatar',
+          'starsEarned',
+          'totalMinutesRead',
+          'storiesCompleted',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'name',
+          'ageGroup',
+          'avatar',
+          'starsEarned',
+          'totalMinutesRead',
+          'storiesCompleted',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 40
+        && data.ageGroup is string
+        && (data.ageGroup == '2-3' || data.ageGroup == '4-5')
+        && data.avatar is string
+        && (data.avatar == 'duck' || data.avatar == 'bear' || data.avatar == 'firefly' || data.avatar == 'fox')
+        && data.starsEarned is number
+        && data.starsEarned >= 0
+        && data.starsEarned <= 10000
+        && data.totalMinutesRead is number
+        && data.totalMinutesRead >= 0
+        && data.totalMinutesRead <= 100000
+        && data.storiesCompleted is number
+        && data.storiesCompleted >= 0
+        && data.storiesCompleted <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: CustomStory
+    function isValidCustomStory(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'title',
+          'subtitle',
+          'ageGroup',
+          'moralTitle',
+          'moralLesson',
+          'parentDiscussionPrompt',
+          'coverMediaId',
+          'coverFallbackId',
+          'readMinutes',
+          'pages',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'title',
+          'subtitle',
+          'ageGroup',
+          'moralTitle',
+          'moralLesson',
+          'parentDiscussionPrompt',
+          'coverMediaId',
+          'coverFallbackId',
+          'readMinutes',
+          'pages',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 120
+        && data.subtitle is string
+        && data.subtitle.size() <= 180
+        && data.ageGroup is string
+        && (data.ageGroup == '2-3' || data.ageGroup == '4-5')
+        && data.moralTitle is string
+        && data.moralTitle.size() >= 1
+        && data.moralTitle.size() <= 60
+        && data.moralLesson is string
+        && data.moralLesson.size() >= 1
+        && data.moralLesson.size() <= 360
+        && data.parentDiscussionPrompt is string
+        && data.parentDiscussionPrompt.size() <= 240
+        && data.coverMediaId is string
+        && data.coverMediaId.size() <= 128
+        && data.coverFallbackId is string
+        && data.coverFallbackId.size() <= 64
+        && data.readMinutes is number
+        && data.readMinutes >= 1
+        && data.readMinutes <= 30
+        && data.pages is list
+        && data.pages.size() >= 1
+        && data.pages.size() <= 10
+        && data.pages[0] is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ReadingLog
+    function isValidReadingLog(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'childId',
+          'storyId',
+          'storyTitle',
+          'moralTitle',
+          'durationSeconds',
+          'usedBedtimeMode',
+          'completedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'childId',
+          'storyId',
+          'storyTitle',
+          'moralTitle',
+          'durationSeconds',
+          'usedBedtimeMode',
+          'completedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidId(data.childId)
+        && isValidId(data.storyId)
+        && data.storyTitle is string
+        && data.storyTitle.size() >= 1
+        && data.storyTitle.size() <= 120
+        && data.moralTitle is string
+        && data.moralTitle.size() >= 1
+        && data.moralTitle.size() <= 60
+        && data.durationSeconds is number
+        && data.durationSeconds >= 1
+        && data.durationSeconds <= 7200
+        && data.usedBedtimeMode is bool
+        && data.completedAt is timestamp;
+    }
+
+    // Parent Account & Bedtime Settings
+    match /users/{userId} {
+      allow get: if isSignedIn() && isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName',
+            'updatedAt'
+          ]) ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'bedtimeEnabled',
+            'bedtimeDimness',
+            'sleepTimerMinutes',
+            'maxStoriesPerSession',
+            'calmVoiceDefault',
+            'ambientLullaby',
+            'reducedMotion',
+            'updatedAt'
+          ])
+        );
+      allow delete: if false;
+
+      // Child Reader Profiles
+      match /children/{childId} {
+        allow get: if isSignedIn() && isOwner(userId) && isValidId(userId) && isValidId(childId);
+        allow list: if isSignedIn() && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(childId)
+          && isValidChildProfile(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId);
+        allow update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(childId)
+          && isValidChildProfile(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId)
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'ageGroup',
+              'avatar',
+              'updatedAt'
+            ]) ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'starsEarned',
+              'totalMinutesRead',
+              'storiesCompleted',
+              'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(childId)
+          && existing().ownerId == request.auth.uid;
+      }
+
+      // Parent-Scanned Custom Storybooks
+      match /stories/{storyId} {
+        allow get: if isSignedIn() && isOwner(userId) && isValidId(userId) && isValidId(storyId);
+        allow list: if isSignedIn() && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidCustomStory(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId);
+        allow update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidCustomStory(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title',
+            'subtitle',
+            'ageGroup',
+            'moralTitle',
+            'moralLesson',
+            'parentDiscussionPrompt',
+            'coverMediaId',
+            'coverFallbackId',
+            'readMinutes',
+            'pages',
+            'updatedAt'
+          ]);
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && existing().ownerId == request.auth.uid;
+      }
+
+      // Immutable Reading Progress Logs
+      match /readingLogs/{logId} {
+        allow get: if isSignedIn() && isOwner(userId) && isValidId(userId) && isValidId(logId);
+        allow list: if isSignedIn() && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(logId)
+          && isValidReadingLog(incoming(), userId)
+          && incoming().completedAt == request.time
+          && parentAccountExists(userId)
+          && exists(/databases/$(database)/documents/users/$(userId)/children/$(incoming().childId));
+        allow update: if false;
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(logId)
+          && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}
