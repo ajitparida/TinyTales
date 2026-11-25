@@ -31,12 +31,26 @@
   --berry-accent: #E06D7A;
 }
 
+html {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: var(--paper-bg);
   color: var(--ink-primary);
+  overscroll-behavior-y: contain;
   transition: background-color 280ms cubic-bezier(0.16, 1, 0.3, 1),
     color 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+button,
+a,
+[role="button"],
+[role="tab"],
+[role="switch"] {
+  touch-action: manipulation;
 }
 
 .dark body,
@@ -52,6 +66,44 @@ body {
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Native safe-area inset utilities for notched phones & iPad home indicator */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+.pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+.pb-mobile-nav {
+  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+.bottom-mobile-toast {
+  bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+}
+
+.bottom-safe-toast {
+  bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Hide scrollbars for horizontal touch carousels & filter rails */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Gentle storybook paper texture overlay (subtle, tactile) */

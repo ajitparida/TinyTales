@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   AlertCircle,
@@ -9,6 +9,8 @@ import {
   Crop,
   Loader2,
   Mic,
+  Moon,
+  MoreHorizontal,
   Pause,
   Pencil,
   Play,
@@ -18,6 +20,7 @@ import {
   Sparkles,
   Square,
   Star,
+  Sun,
   Trash2,
   Volume2,
   X,
@@ -61,6 +64,9 @@ import {
 } from '../lib/voiceStudio';
 import { StoryConfetti } from './StoryConfetti';
 import { PageImageFramingModal } from './PageImageFramingModal';
+import { BottomSheet } from './BottomSheet';
+
+type ReaderSheet = 'voices' | 'recorder' | 'menu' | null;
 
 interface StoryReaderProps {
   story: Story;
@@ -68,6 +74,7 @@ interface StoryReaderProps {
   bedtimeSettings: BedtimeSettings;
   voicePreferences: VoicePreferences;
   onUpdateVoicePreferences: (next: VoicePreferences) => void;
+  onToggleBedtime?: () => void;
   onEditStory?: (story: Story) => void;
   onExit: () => void;
   onStoryCompleted: (story: Story, durationSeconds: number) => void;
@@ -190,12 +197,14 @@ export function StoryReader({
   bedtimeSettings,
   voicePreferences,
   onUpdateVoicePreferences,
+  onToggleBedtime,
   onEditStory,
   onExit,
   onStoryCompleted,
 }: StoryReaderProps) {
   const totalPages = story.pages.length;
   const [pageIndex, setPageIndex] = useState(0);
+  const [pageDirection, setPageDirection] = useState<1 | -1>(1);
   const safePageIndex = Math.min(pageIndex, totalPages);
   const isMoralSpread = safePageIndex >= totalPages;
   const currentPage = !isMoralSpread ? story.pages[safePageIndex] : null;
@@ -224,9 +233,20 @@ export function StoryReader({
   const [voiceSource, setVoiceSource] = useState<'ai' | 'parent'>('ai');
   const [hasParentRecording, setHasParentRecording] = useState(false);
   const [nextPagePreloaded, setNextPagePreloaded] = useState(false);
-  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  const [activeSheet, setActiveSheet] = useState<ReaderSheet>(null);
   const stopDeviceSpeechRef = useRef<(() => void) | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+
+  // Swipe-to-turn page touch gesture state
+  const [swipeOffsetX, setSwipeOffsetX] = useState(0);
+  const [isSwiping, setIsSwiping] = useState(false);
+  const touchGestureRef = useRef<{
+    startX: number;
+    startY: number;
+    startTime: number;
+    axis: 'undecided' | 'horizontal' | 'vertical';
+    ignored: boolean;
+  } | null>(null);
 
   const dismissAiVoiceToast = useCallback(() => {
     if (toastTimerRef.current !== null) {
@@ -251,7 +271,6 @@ export function StoryReader({
   );
 
   // Parent Voice Studio state
-  const [showRecorder, setShowRecorder] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -507,6 +526,7 @@ export function StoryReader({
         if (!isPreview && voicePreferences.autoRead && !isMoralSpread) {
           pendingAutoStartRef.current = true;
           autoAdvanceTimerRef.current = window.setTimeout(() => {
+            setPageDirection(1);
             setPageIndex((prev) => Math.min(totalPages, prev + 1));
           }, 1500);
         }
@@ -570,6 +590,7 @@ export function StoryReader({
         if (voicePreferences.autoRead && !isMoralSpread) {
           pendingAutoStartRef.current = true;
           autoAdvanceTimerRef.current = window.setTimeout(() => {
+            setPageDirection(1);
             setPageIndex((prev) => Math.min(totalPages, prev + 1));
           }, 1500);
         }
@@ -933,445 +954,541 @@ export function StoryReader({
 
   const reduced = bedtimeSettings.bedtimeEnabled && bedtimeSettings.reducedMotion;
 
+  const goToPage = useCallback(
+    (nextIndex: number) => {
+      const clamped = Math.max(0, Math.min(totalPages, nextIndex));
+      if (clamped === safePageIndex) return;
+      pendingAutoStartRef.current = false;
+      setPageDirection(clamped > safePageIndex ? 1 : -1);
+      setPageIndex(clamped);
+    },
+    [safePageIndex, totalPages]
+  );
+
+  // Keyboard arrow navigation for desktop & iPad hardware keyboards
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (activeSheet || showImageResizer) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        goToPage(safePageIndex + 1);
+      } else if (e.key === 'ArrowLeft') {
+        goToPage(safePageIndex - 1);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeSheet, showImageResizer, goToPage, safePageIndex]);
+
+  // Native swipe-left / swipe-right page turn gesture handlers
+  const handleStageTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length !== 1 || activeSheet || showImageResizer) return;
+    const target = e.target as HTMLElement | null;
+    const isInteractiveIgnore = Boolean(target?.closest('[data-no-swipe="true"]'));
+    const touch = e.touches[0];
+    touchGestureRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startTime: Date.now(),
+      axis: 'undecided',
+      ignored: isInteractiveIgnore,
+    };
+    setSwipeOffsetX(0);
+    setIsSwiping(false);
+  };
+
+  const handleStageTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    const gesture = touchGestureRef.current;
+    if (!gesture || gesture.ignored || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - gesture.startX;
+    const dy = touch.clientY - gesture.startY;
+
+    if (gesture.axis === 'undecided') {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      if (Math.abs(dx) > Math.abs(dy) * 1.15) {
+        gesture.axis = 'horizontal';
+        setIsSwiping(true);
+      } else {
+        gesture.axis = 'vertical';
+        return;
+      }
+    }
+
+    if (gesture.axis !== 'horizontal') return;
+
+    const atStartPullingRight = safePageIndex === 0 && dx > 0;
+    const atEndPullingLeft = isMoralSpread && dx < 0;
+    const resistance = atStartPullingRight || atEndPullingLeft ? 0.24 : 0.72;
+    const clampedOffset = Math.max(-130, Math.min(130, dx * resistance));
+    setSwipeOffsetX(clampedOffset);
+  };
+
+  const handleStageTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    const gesture = touchGestureRef.current;
+    touchGestureRef.current = null;
+    if (!gesture || gesture.ignored || gesture.axis !== 'horizontal') {
+      setSwipeOffsetX(0);
+      setIsSwiping(false);
+      return;
+    }
+
+    const endTouch = e.changedTouches[0];
+    const rawDx = endTouch ? endTouch.clientX - gesture.startX : 0;
+    const elapsed = Math.max(1, Date.now() - gesture.startTime);
+    const velocity = Math.abs(rawDx) / elapsed;
+
+    setSwipeOffsetX(0);
+    setIsSwiping(false);
+
+    const passedThreshold = Math.abs(rawDx) >= 56 || (Math.abs(rawDx) >= 28 && velocity >= 0.35);
+    if (!passedThreshold) return;
+
+    if (rawDx < 0 && safePageIndex < totalPages) {
+      goToPage(safePageIndex + 1);
+    } else if (rawDx > 0 && safePageIndex > 0) {
+      goToPage(safePageIndex - 1);
+    }
+  };
+
+  const handleStageTouchCancel = () => {
+    touchGestureRef.current = null;
+    setSwipeOffsetX(0);
+    setIsSwiping(false);
+  };
+
+  const pageTransitionVariants = {
+    enter: (dir: number) =>
+      reduced ? { opacity: 1, x: 0 } : { opacity: 0, x: dir > 0 ? 38 : -38 },
+    center: { opacity: 1, x: 0 },
+    exit: (dir: number) =>
+      reduced ? { opacity: 0, x: 0 } : { opacity: 0, x: dir > 0 ? -38 : 38 },
+  };
+
+  const handleExitReader = () => {
+    stopAudio(true);
+    stopCharacterAudio();
+    onExit();
+  };
+
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
+    <main className="min-h-[100dvh] flex flex-col max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-6 lg:pb-8">
       <StoryConfetti
         triggerKey={confettiBurstKey}
         isBedtime={bedtimeSettings.bedtimeEnabled}
         reducedMotion={reduced}
       />
 
-      {/* Top Story Context Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-        <button
-          type="button"
-          onClick={() => {
-            stopAudio(true);
-            stopCharacterAudio();
-            onExit();
-          }}
-          className="inline-flex items-center gap-2 text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] transition-colors cursor-pointer"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to Library
-        </button>
+      {/* Immersive Compact Sticky Reader Header (52px, safe-area top aware) */}
+      <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-3 sm:px-6 lg:px-8 pt-safe bg-[#FAF8F4]/92 dark:bg-[#121624]/92 backdrop-blur-md border-b border-[#E6E1D8]/85 dark:border-[#2A324B]/85 mb-4 sm:mb-6">
+        <div className="h-[52px] sm:h-14 flex items-center justify-between gap-2 sm:gap-4">
+          {/* Left: Back to Library */}
+          <button
+            type="button"
+            onClick={handleExitReader}
+            aria-label="Back to Library"
+            className="inline-flex items-center gap-1.5 min-h-[44px] min-w-[44px] px-2 sm:px-3 -ml-1 rounded-xl text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#EFECE5]/80 dark:hover:bg-[#1E263D] transition-colors active:scale-95 cursor-pointer shrink-0"
+          >
+            <ArrowLeft className="w-5 h-5 sm:w-4 sm:h-4" />
+            <span className="hidden sm:inline">Library</span>
+          </button>
 
-        <div className="flex flex-wrap items-center gap-2.5 text-xs sm:text-sm font-medium text-[#5C646B] dark:text-[#A4AEC2]">
-          <span className="font-display font-semibold text-[#24292E] dark:text-[#EDE9DF]">
-            {story.title}
-          </span>
-          <span aria-hidden="true">·</span>
-          <span className="tabular-nums">
-            {isMoralSpread ? 'Story Moral' : `Page ${safePageIndex + 1} of ${totalPages}`}
-          </span>
-          {story.isCustom && onEditStory && (
-            <>
-              <span aria-hidden="true">·</span>
+          {/* Center: Story Title + Tabular Page Counter */}
+          <div className="min-w-0 flex-1 text-center">
+            <div className="font-display text-sm sm:text-base font-semibold text-[#24292E] dark:text-[#EDE9DF] truncate">
+              {story.title}
+            </div>
+            <div className="text-[11px] sm:text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] tabular-nums leading-tight">
+              {isMoralSpread ? 'Story Moral' : `Page ${safePageIndex + 1} of ${totalPages}`}
+            </div>
+          </div>
+
+          {/* Right: Bedtime Toggle + Voices Sheet + More Actions */}
+          <div className="flex items-center gap-1 shrink-0">
+            {onToggleBedtime && (
               <button
                 type="button"
-                onClick={() => {
-                  stopAudio(true);
-                  stopCharacterAudio();
-                  onEditStory(story);
-                }}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline cursor-pointer"
+                onClick={onToggleBedtime}
+                aria-label={
+                  bedtimeSettings.bedtimeEnabled
+                    ? 'Switch to Daytime Mode'
+                    : 'Switch to Bedtime Mode'
+                }
+                aria-pressed={bedtimeSettings.bedtimeEnabled}
+                className={`min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center transition-colors active:scale-95 cursor-pointer ${
+                  bedtimeSettings.bedtimeEnabled
+                    ? 'bg-[#E5A94C]/18 text-[#E5A94C]'
+                    : 'text-[#5C646B] dark:text-[#A4AEC2] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
+                }`}
               >
-                <Pencil className="w-3.5 h-3.5" />
-                Edit Book
+                {bedtimeSettings.bedtimeEnabled ? (
+                  <Sun className="w-[19px] h-[19px]" />
+                ) : (
+                  <Moon className="w-[19px] h-[19px]" />
+                )}
               </button>
-            </>
-          )}
-        </div>
+            )}
 
-        {/* Visual Progress Dots */}
-        <div className="flex items-center gap-1.5" aria-label="Reading progress">
+            <button
+              type="button"
+              onClick={() => setActiveSheet('voices')}
+              aria-label="Voices and reading speed"
+              className="inline-flex items-center justify-center gap-1.5 min-w-[44px] min-h-[44px] sm:px-3 rounded-xl text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] transition-colors active:scale-95 cursor-pointer"
+            >
+              <SlidersHorizontal className="w-[18px] h-[18px]" />
+              <span className="hidden md:inline">Voices</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSheet('menu')}
+              aria-label="Story options"
+              className="min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] transition-colors active:scale-95 cursor-pointer"
+            >
+              <MoreHorizontal className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Visual Progress Dots + Subtle Swipe Hint */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4 sm:mb-5">
+        <div
+          className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full"
+          aria-label="Reading progress"
+        >
           {story.pages.map((p, idx) => (
             <button
               key={p.id}
               type="button"
-              onClick={() => {
-                pendingAutoStartRef.current = false;
-                setPageIndex(idx);
-              }}
+              onClick={() => goToPage(idx)}
               aria-label={`Go to page ${idx + 1}`}
-              className={`h-2 rounded-full transition-all cursor-pointer ${
-                idx === pageIndex
-                  ? 'w-7 bg-[#2F7A5E] dark:bg-[#E5A94C]'
-                  : idx < pageIndex
-                    ? 'w-2.5 bg-[#2F7A5E]/45 dark:bg-[#E5A94C]/50'
-                    : 'w-2.5 bg-[#D8D1C4] dark:bg-[#2A324B]'
-              }`}
-            />
+              className="min-h-[36px] px-1 flex items-center justify-center cursor-pointer"
+            >
+              <span
+                className={`block h-2 rounded-full transition-all ${
+                  idx === safePageIndex
+                    ? 'w-7 bg-[#2F7A5E] dark:bg-[#E5A94C]'
+                    : idx < safePageIndex
+                      ? 'w-2.5 bg-[#2F7A5E]/45 dark:bg-[#E5A94C]/50'
+                      : 'w-2.5 bg-[#D8D1C4] dark:bg-[#2A324B]'
+                }`}
+              />
+            </button>
           ))}
           <button
             type="button"
-            onClick={() => {
-              pendingAutoStartRef.current = false;
-              setPageIndex(totalPages);
-            }}
+            onClick={() => goToPage(totalPages)}
             aria-label="Go to end-of-story moral"
-            className={`h-2 rounded-full transition-all cursor-pointer ${
-              isMoralSpread
-                ? 'w-7 bg-[#D98A1C] dark:bg-[#E5A94C]'
-                : 'w-2.5 bg-[#D8D1C4] dark:bg-[#2A324B]'
-            }`}
-          />
+            className="min-h-[36px] px-1 flex items-center justify-center cursor-pointer"
+          >
+            <span
+              className={`block h-2 rounded-full transition-all ${
+                isMoralSpread
+                  ? 'w-7 bg-[#D98A1C] dark:bg-[#E5A94C]'
+                  : 'w-2.5 bg-[#D8D1C4] dark:bg-[#2A324B]'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 text-[11px] sm:text-xs text-[#5C646B] dark:text-[#A4AEC2]">
+          <span className="lg:hidden">Swipe left or right to turn pages</span>
+          {story.isCustom && onEditStory && (
+            <button
+              type="button"
+              onClick={() => {
+                stopAudio(true);
+                stopCharacterAudio();
+                onEditStory(story);
+              }}
+              className="hidden sm:inline-flex items-center gap-1 font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline cursor-pointer"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit Book
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Main Two-Zone Open-Book Reading Stage */}
-      <AnimatePresence mode="wait">
-        {!isMoralSpread && currentPage ? (
-          <motion.div
-            key={currentPage.id}
-            initial={reduced ? { opacity: 1 } : { opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={reduced ? { opacity: 1 } : { opacity: 0, y: -8 }}
-            transition={{ duration: 0.25 }}
-            className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-stretch"
-          >
-            {/* Left Zone (65% / 8 cols): Interactive Watercolor Illustration Canvas */}
-            <div className="lg:col-span-8 flex flex-col">
-              <div className="relative aspect-[4/3] w-full rounded-2xl overflow-hidden bg-[#EFEBE2] dark:bg-[#151A2B] border border-[#E6E1D8] dark:border-[#2A324B]">
-                {resolvedPageImage && (
-                  <img
-                    src={resolvedPageImage}
-                    alt={currentPage.sceneSummary || story.title}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover select-none"
-                  />
-                )}
+      {/* Swipeable Main Two-Zone Open-Book Reading Stage */}
+      <div
+        onTouchStart={handleStageTouchStart}
+        onTouchMove={handleStageTouchMove}
+        onTouchEnd={handleStageTouchEnd}
+        onTouchCancel={handleStageTouchCancel}
+        style={{
+          transform: swipeOffsetX !== 0 ? `translate3d(${swipeOffsetX}px, 0, 0)` : undefined,
+          transition: isSwiping ? 'none' : 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+        className="flex-1 will-change-transform"
+      >
+        <AnimatePresence mode="wait" custom={pageDirection} initial={false}>
+          {!isMoralSpread && currentPage ? (
+            <motion.div
+              key={currentPage.id}
+              custom={pageDirection}
+              variants={pageTransitionVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={
+                reduced
+                  ? { duration: 0.08 }
+                  : { duration: 0.24, ease: [0.16, 1, 0.3, 1] }
+              }
+              className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 lg:gap-8 items-stretch"
+            >
+              {/* Left Zone (65% / 8 cols): Interactive Watercolor Illustration Canvas */}
+              <div className="lg:col-span-8 flex flex-col">
+                <div className="relative aspect-[4/3] w-full rounded-2xl overflow-hidden bg-[#EFEBE2] dark:bg-[#151A2B] border border-[#E6E1D8] dark:border-[#2A324B] shadow-xs">
+                  {resolvedPageImage && (
+                    <img
+                      src={resolvedPageImage}
+                      alt={currentPage.sceneSummary || story.title}
+                      referrerPolicy="no-referrer"
+                      draggable={false}
+                      className="w-full h-full object-cover select-none"
+                    />
+                  )}
 
-                {/* Tappable Interactive Character Hotspots */}
-                {currentPage.hotspots.map((hotspot) => {
-                  const isSelected = activeHotspot?.id === hotspot.id;
-                  const wasTapped = tappedHotspotIds.has(hotspot.id);
-                  const animateProps =
-                    isSelected && !reduced
-                      ? hotspot.reaction === 'bounce'
-                        ? { y: [0, -10, 0] }
-                        : hotspot.reaction === 'wiggle'
-                          ? { rotate: [0, -12, 12, -6, 0] }
-                          : { scale: [1, 1.22, 1] }
-                      : {};
+                  {/* Tappable Interactive Character Hotspots */}
+                  {currentPage.hotspots.map((hotspot) => {
+                    const isSelected = activeHotspot?.id === hotspot.id;
+                    const wasTapped = tappedHotspotIds.has(hotspot.id);
+                    const animateProps =
+                      isSelected && !reduced
+                        ? hotspot.reaction === 'bounce'
+                          ? { y: [0, -10, 0] }
+                          : hotspot.reaction === 'wiggle'
+                            ? { rotate: [0, -12, 12, -6, 0] }
+                            : { scale: [1, 1.22, 1] }
+                        : {};
 
-                  return (
-                    <motion.button
-                      key={hotspot.id}
-                      type="button"
-                      onClick={() => handleTapHotspot(hotspot)}
-                      animate={animateProps}
-                      transition={{ duration: 0.45 }}
-                      style={{
-                        left: `${hotspot.x}%`,
-                        top: `${hotspot.y}%`,
-                      }}
-                      aria-label={`Tap ${hotspot.name} to hear them speak`}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center cursor-pointer focus-visible:outline-2 focus-visible:outline-white group"
-                    >
-                      {!reduced && (
-                        <span className="absolute inset-0 rounded-full border-2 border-[#FFF8E7] bg-[#D98A1C]/20 animate-ring-ripple" />
-                      )}
-                      <span
-                        className={`relative z-10 w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border-2 border-white shadow-md transition-transform group-hover:scale-110 ${
-                          isSelected
-                            ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
-                            : wasTapped
-                              ? 'bg-[#D98A1C] text-white'
-                              : 'bg-white/90 text-[#2F7A5E]'
-                        }`}
+                    return (
+                      <motion.button
+                        key={hotspot.id}
+                        type="button"
+                        data-no-swipe="true"
+                        onClick={() => handleTapHotspot(hotspot)}
+                        animate={animateProps}
+                        transition={{ duration: 0.45 }}
+                        style={{
+                          left: `${hotspot.x}%`,
+                          top: `${hotspot.y}%`,
+                        }}
+                        aria-label={`Tap ${hotspot.name} to hear them speak`}
+                        className="absolute -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center cursor-pointer focus-visible:outline-2 focus-visible:outline-white group"
                       >
-                        <Sparkles className="w-4 h-4" />
-                      </span>
-                    </motion.button>
-                  );
-                })}
+                        {!reduced && (
+                          <span className="absolute inset-0 rounded-full border-2 border-[#FFF8E7] bg-[#D98A1C]/20 animate-ring-ripple" />
+                        )}
+                        <span
+                          className={`relative z-10 w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border-2 border-white shadow-md transition-transform group-hover:scale-110 ${
+                            isSelected
+                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                              : wasTapped
+                                ? 'bg-[#D98A1C] text-white'
+                                : 'bg-white/90 text-[#2F7A5E]'
+                          }`}
+                        >
+                          <Sparkles className="w-4 h-4" />
+                        </span>
+                      </motion.button>
+                    );
+                  })}
 
-                {/* Spoken Character Speech Callout Overlay */}
-                <AnimatePresence>
-                  {activeHotspot && (
-                    <motion.div
-                      key={activeHotspot.id}
-                      initial={{ opacity: 0, y: 12, scale: 0.96 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 8, scale: 0.96 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute bottom-4 left-4 right-4 sm:left-6 sm:right-auto sm:max-w-md bg-white/95 dark:bg-[#1A2033]/95 backdrop-blur-md border border-[#E6E1D8] dark:border-[#34405E] rounded-2xl p-4 shadow-lg"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2 text-xs font-semibold text-[#D98A1C] dark:text-[#E5A94C] mb-1">
-                            <span>{activeHotspot.name} says</span>
-                            {characterVoiceLoading && (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            )}
+                  {/* Spoken Character Speech Callout Overlay */}
+                  <AnimatePresence>
+                    {activeHotspot && (
+                      <motion.div
+                        key={activeHotspot.id}
+                        data-no-swipe="true"
+                        initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                        transition={{ duration: 0.2 }}
+                        className="absolute bottom-3 left-3 right-3 sm:bottom-4 sm:left-6 sm:right-auto sm:max-w-md bg-white/95 dark:bg-[#1A2033]/95 backdrop-blur-md border border-[#E6E1D8] dark:border-[#34405E] rounded-2xl p-4 shadow-lg"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2 text-xs font-semibold text-[#D98A1C] dark:text-[#E5A94C] mb-1">
+                              <span>{activeHotspot.name} says</span>
+                              {characterVoiceLoading && (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              )}
+                            </div>
+                            <p className="text-sm sm:text-base font-medium text-[#24292E] dark:text-[#EDE9DF] leading-snug">
+                              “{activeHotspot.dialogue}”
+                            </p>
+                            <button
+                              type="button"
+                              disabled={characterVoiceLoading}
+                              onClick={() => void speakCharacterHotspot(activeHotspot)}
+                              className="mt-2 inline-flex items-center gap-1.5 min-h-[36px] text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              {characterVoiceLoading ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Volume2 className="w-3.5 h-3.5" />
+                              )}
+                              {characterVoiceLoading ? 'Preparing voice...' : 'Hear again'}
+                            </button>
                           </div>
-                          <p className="text-sm sm:text-base font-medium text-[#24292E] dark:text-[#EDE9DF] leading-snug">
-                            “{activeHotspot.dialogue}”
-                          </p>
                           <button
                             type="button"
-                            disabled={characterVoiceLoading}
-                            onClick={() => void speakCharacterHotspot(activeHotspot)}
-                            className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                            onClick={() => {
+                              stopCharacterAudio();
+                              setActiveHotspot(null);
+                            }}
+                            className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
                           >
-                            {characterVoiceLoading ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Volume2 className="w-3.5 h-3.5" />
-                            )}
-                            {characterVoiceLoading ? 'Preparing voice...' : 'Hear again'}
+                            Close
                           </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            stopCharacterAudio();
-                            setActiveHotspot(null);
-                          }}
-                          className="text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] px-2 py-1 cursor-pointer"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </motion.div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#5C646B] dark:text-[#A4AEC2] mt-2.5">
+                  {currentPage.hotspots.length > 0 ? (
+                    <span>
+                      Tap glowing circles to hear {currentPage.hotspots.map((h) => h.name).join(' and ')} speak aloud.
+                    </span>
+                  ) : (
+                    <span />
                   )}
-                </AnimatePresence>
+                  <div className="flex items-center gap-3">
+                    {story.isCustom && currentPage.mediaId && resolvedPageImage && (
+                      <button
+                        type="button"
+                        onClick={() => setShowImageResizer(true)}
+                        className="inline-flex items-center gap-1 font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline cursor-pointer"
+                      >
+                        <Crop className="w-3.5 h-3.5" />
+                        Resize Image
+                      </button>
+                    )}
+                    {nextPagePreloaded && (
+                      <span className="text-[#2F7A5E] dark:text-[#5CA49B]">
+                        Next page voice preloaded
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#5C646B] dark:text-[#A4AEC2] mt-2.5">
-                <span>
-                  Tap glowing circles to hear {currentPage.hotspots.map((h) => h.name).join(' and ')} speak aloud.
-                </span>
-                <div className="flex items-center gap-3">
-                  {story.isCustom && currentPage.mediaId && resolvedPageImage && (
+              {/* Right Zone (35% / 4 cols): Follow-Along Prose, Tap-to-Play, & Sheet Triggers */}
+              <div className="lg:col-span-4 flex flex-col justify-between bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-5 sm:p-7 watercolor-paper-frame">
+                <div>
+                  <div className="flex items-center justify-between gap-2 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] mb-3.5">
+                    <span>Ages {story.ageGroup}</span>
+                    <span>
+                      {voiceSource === 'parent' && hasParentRecording
+                        ? 'Parent Voice'
+                        : voiceEngine === 'device'
+                          ? `Device Voice · ${voicePreferences.readingSpeed}×`
+                          : `${activePersonaOption.label} · ${voicePreferences.readingSpeed}×`}
+                    </span>
+                  </div>
+
+                  {/* Follow-Along Highlighted Early-Reader Text */}
+                  <div
+                    className={`mb-5 ${
+                      currentPage.text.length > 260
+                        ? 'max-h-[260px] sm:max-h-[340px] overflow-y-auto overscroll-contain pr-2'
+                        : ''
+                    }`}
+                  >
+                    <HighlightedText
+                      text={currentPage.text}
+                      progress={audioProgress}
+                      isPlaying={isPlaying}
+                      className={`font-display ${
+                        currentPage.text.length > 520
+                          ? 'text-base sm:text-lg leading-[1.62]'
+                          : currentPage.text.length > 240
+                            ? 'text-lg sm:text-xl leading-[1.58]'
+                            : 'text-[1.35rem] sm:text-[1.6rem] leading-[1.52]'
+                      }`}
+                    />
+                  </div>
+
+                  {/* Primary Toddler-Friendly Tap-to-Play Voice Button */}
+                  <button
+                    type="button"
+                    data-no-swipe="true"
+                    onClick={handleToggleNarration}
+                    disabled={isLoadingAudio}
+                    className="w-full min-h-[56px] px-6 py-3.5 rounded-2xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold text-base flex items-center justify-center gap-3 transition-all active:scale-[0.98] disabled:opacity-65 cursor-pointer"
+                  >
+                    {isLoadingAudio ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        Preparing Voice...
+                      </>
+                    ) : isPlaying ? (
+                      <>
+                        <Pause className="w-5 h-5" />
+                        Pause Narration
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="w-5 h-5" />
+                        {voiceSource === 'parent' && hasParentRecording
+                          ? 'Tap to Hear Parent Voice'
+                          : 'Tap to Play Voice'}
+                      </>
+                    )}
+                  </button>
+
+                  {/* Auto-Read & Native Bottom Sheet Triggers */}
+                  <div className="mt-3 grid grid-cols-2 gap-2" data-no-swipe="true">
                     <button
                       type="button"
-                      onClick={() => setShowImageResizer(true)}
-                      className="inline-flex items-center gap-1 font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline cursor-pointer"
+                      role="switch"
+                      aria-checked={voicePreferences.autoRead}
+                      onClick={() =>
+                        onUpdateVoicePreferences({
+                          ...voicePreferences,
+                          autoRead: !voicePreferences.autoRead,
+                        })
+                      }
+                      className={`inline-flex items-center justify-center gap-2 min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold border transition-colors active:scale-[0.98] whitespace-nowrap cursor-pointer ${
+                        voicePreferences.autoRead
+                          ? 'bg-[#2F7A5E]/12 dark:bg-[#E5A94C]/18 border-[#2F7A5E]/35 dark:border-[#E5A94C]/40 text-[#2F7A5E] dark:text-[#E5A94C]'
+                          : 'border-[#E6E1D8] dark:border-[#2A324B] text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
+                      }`}
                     >
-                      <Crop className="w-3.5 h-3.5" />
-                      Resize Image
+                      <span>Auto-Read: {voicePreferences.autoRead ? 'On' : 'Off'}</span>
                     </button>
-                  )}
-                  {nextPagePreloaded && (
-                    <span className="text-[#2F7A5E] dark:text-[#5CA49B]">
-                      Next page voice preloaded
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
 
-            {/* Right Zone (35% / 4 cols): Follow-Along Prose, Voice Persona, Auto-Read & Parent Voice Studio */}
-            <div className="lg:col-span-4 flex flex-col justify-between bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-6 sm:p-7 watercolor-paper-frame">
-              <div>
-                <div className="flex items-center justify-between gap-2 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] mb-4">
-                  <span>Ages {story.ageGroup}</span>
-                  <span>
-                    {voiceSource === 'parent' && hasParentRecording
-                      ? 'Parent Voice'
-                      : voiceEngine === 'device'
-                        ? `Device Voice · ${voicePreferences.readingSpeed}×`
-                        : `${activePersonaOption.label} · ${voicePreferences.readingSpeed}×`}
-                  </span>
-                </div>
-
-                {/* Follow-Along Highlighted Early-Reader Text (adapts gracefully for long verbatim scanned pages) */}
-                <div
-                  className={`mb-6 ${
-                    currentPage.text.length > 260
-                      ? 'max-h-[300px] sm:max-h-[360px] overflow-y-auto pr-2'
-                      : ''
-                  }`}
-                >
-                  <HighlightedText
-                    text={currentPage.text}
-                    progress={audioProgress}
-                    isPlaying={isPlaying}
-                    className={`font-display ${
-                      currentPage.text.length > 520
-                        ? 'text-base sm:text-lg leading-[1.62]'
-                        : currentPage.text.length > 240
-                          ? 'text-lg sm:text-xl leading-[1.58]'
-                          : 'text-2xl sm:text-[1.6rem] leading-[1.54]'
-                    }`}
-                  />
-                </div>
-
-                {/* Primary Toddler-Friendly Tap-to-Play Voice Button */}
-                <button
-                  type="button"
-                  onClick={handleToggleNarration}
-                  disabled={isLoadingAudio}
-                  className="w-full min-h-[58px] px-6 py-3.5 rounded-2xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold text-base flex items-center justify-center gap-3 transition-colors disabled:opacity-65 cursor-pointer"
-                >
-                  {isLoadingAudio ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Preparing Voice...
-                    </>
-                  ) : isPlaying ? (
-                    <>
-                      <Pause className="w-5 h-5" />
-                      Pause Narration
-                    </>
-                  ) : (
-                    <>
-                      <Volume2 className="w-5 h-5" />
-                      {voiceSource === 'parent' && hasParentRecording
-                        ? 'Tap to Hear Parent Voice'
-                        : 'Tap to Play Voice'}
-                    </>
-                  )}
-                </button>
-
-                {/* Auto-Read & Voice Options Row */}
-                <div className="mt-3.5 flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={voicePreferences.autoRead}
-                    onClick={() =>
-                      onUpdateVoicePreferences({
-                        ...voicePreferences,
-                        autoRead: !voicePreferences.autoRead,
-                      })
-                    }
-                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap cursor-pointer ${
-                      voicePreferences.autoRead
-                        ? 'bg-[#2F7A5E]/12 dark:bg-[#E5A94C]/18 border-[#2F7A5E]/35 dark:border-[#E5A94C]/40 text-[#2F7A5E] dark:text-[#E5A94C]'
-                        : 'border-[#E6E1D8] dark:border-[#2A324B] text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
-                    }`}
-                  >
-                    <span>Auto-Read: {voicePreferences.autoRead ? 'On' : 'Off'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowVoiceSettings((v) => !v)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] transition-colors whitespace-nowrap cursor-pointer"
-                  >
-                    <SlidersHorizontal className="w-3.5 h-3.5" />
-                    Voices & Speed
-                  </button>
-                </div>
-
-                {/* Expandable Voice Engine, 5-Voice Persona & Reading Speed Controls */}
-                {showVoiceSettings && (
-                  <div className="mt-3 p-3.5 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] space-y-3">
-                    <div>
-                      <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-1.5">
-                        Narration Engine
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <button
-                          type="button"
-                          onClick={handleSwitchBackToAiVoice}
-                          className={`py-2 px-2.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                            voiceEngine === 'ai'
-                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
-                              : 'bg-white dark:bg-[#1A2033] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
-                          }`}
-                        >
-                          AI Storyteller
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            stopAudio(true);
-                            setAudioError(null);
-                            setVoiceSource('ai');
-                            onUpdateVoicePreferences({
-                              ...voicePreferences,
-                              voiceEngine: 'device',
-                            });
-                          }}
-                          className={`py-2 px-2.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                            voiceEngine === 'device'
-                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
-                              : 'bg-white dark:bg-[#1A2033] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
-                          }`}
-                        >
-                          Device Voice (Free)
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-1.5">
-                        {voiceEngine === 'device' ? 'Voice Tone Style' : 'AI Storyteller Voice'}
-                      </div>
-                      <div className="grid grid-cols-1 gap-1">
-                        {VOICE_PERSONAS.map((persona) => {
-                          const active = voicePreferences.voicePersona === persona.id;
-                          return (
-                            <button
-                              key={persona.id}
-                              type="button"
-                              onClick={() => {
-                                stopAudio(true);
-                                setVoiceSource('ai');
-                                onUpdateVoicePreferences({
-                                  ...voicePreferences,
-                                  voicePersona: persona.id as VoicePersonaId,
-                                });
-                              }}
-                              className={`text-left px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-between gap-2 ${
-                                active
-                                  ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] font-semibold border border-[#2F7A5E]/35 dark:border-[#E5A94C]/40'
-                                  : 'text-[#5C646B] dark:text-[#A4AEC2] hover:bg-white/60 dark:hover:bg-[#1A2033]'
-                              }`}
-                            >
-                              <span>{persona.label}</span>
-                              <span className="text-[11px] opacity-75 truncate">
-                                {persona.description.split(',')[0]}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-1.5">
-                        Reading Speed
-                      </div>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        {SPEED_OPTIONS.map((opt) => (
-                          <button
-                            key={opt.value}
-                            type="button"
-                            onClick={() =>
-                              onUpdateVoicePreferences({
-                                ...voicePreferences,
-                                readingSpeed: opt.value,
-                              })
-                            }
-                            className={`py-1.5 px-2 rounded-lg text-xs font-semibold font-mono tabular-nums transition-colors cursor-pointer ${
-                              voicePreferences.readingSpeed === opt.value
-                                ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
-                                : 'bg-white dark:bg-[#1A2033] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSheet('voices')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold border border-[#E6E1D8] dark:border-[#2A324B] text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] transition-colors active:scale-[0.98] whitespace-nowrap cursor-pointer"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      Voices & Speed
+                    </button>
                   </div>
-                )}
 
-                {/* Voice Source Switcher & Clear Parent Voice Studio */}
-                <div className="mt-4 pt-4 border-t border-[#E6E1D8] dark:border-[#2A324B]">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-[#F2EFE8] dark:bg-[#121624]">
+                  {/* Quick Voice Source Switcher + Parent Studio Sheet Trigger */}
+                  <div
+                    className="mt-4 pt-4 border-t border-[#E6E1D8] dark:border-[#2A324B] space-y-2.5"
+                    data-no-swipe="true"
+                  >
+                    <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-[#F2EFE8] dark:bg-[#121624]">
                       <button
                         type="button"
                         onClick={handleSwitchBackToAiVoice}
-                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                        className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                           voiceSource === 'ai' && voiceEngine === 'ai'
-                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF]'
+                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-2xs'
                             : 'text-[#5C646B] dark:text-[#A4AEC2]'
                         }`}
                       >
@@ -1388,27 +1505,27 @@ export function StoryReader({
                             voiceEngine: 'device',
                           });
                         }}
-                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                        className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                           voiceSource === 'ai' && voiceEngine === 'device'
-                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF]'
+                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-2xs'
                             : 'text-[#5C646B] dark:text-[#A4AEC2]'
                         }`}
                       >
-                        Device Voice
+                        Device
                       </button>
                       <button
                         type="button"
                         onClick={() => {
                           stopAudio(true);
                           if (!hasParentRecording) {
-                            setShowRecorder(true);
+                            setActiveSheet('recorder');
                           } else {
                             setVoiceSource('parent');
                           }
                         }}
-                        className={`px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                        className={`min-h-[38px] px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                           voiceSource === 'parent'
-                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF]'
+                            ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-2xs'
                             : 'text-[#5C646B] dark:text-[#A4AEC2]'
                         }`}
                       >
@@ -1418,199 +1535,245 @@ export function StoryReader({
 
                     <button
                       type="button"
-                      onClick={() => setShowRecorder((prev) => !prev)}
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline whitespace-nowrap cursor-pointer"
+                      onClick={() => setActiveSheet('recorder')}
+                      className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-[#E6E1D8] dark:border-[#2A324B] hover:bg-[#FAF8F4] dark:hover:bg-[#232B42] inline-flex items-center justify-center gap-2 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] transition-colors active:scale-[0.98] whitespace-nowrap cursor-pointer"
                     >
-                      <Mic className="w-3.5 h-3.5" />
-                      {showRecorder
-                        ? 'Hide Studio'
-                        : hasParentRecording
-                          ? 'Parent Studio'
-                          : 'Record Voice'}
+                      <Mic className="w-4 h-4" />
+                      {hasParentRecording ? 'Open Parent Voice Studio' : 'Record Parent Voice'}
                     </button>
-                  </div>
 
-                  {showRecorder && (
-                    <div className="mt-3 p-3.5 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] space-y-3">
-                      <p className="text-xs text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed">
-                        Noise reduction & automatic vocal leveling keep your recording warm and crystal-clear.
-                      </p>
-
-                      {/* Live Microphone Level Bar */}
-                      {isRecording && (
-                        <div>
-                          <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-[#C84B58] dark:text-[#E06D7A] mb-1">
-                            <span>Recording clearly...</span>
-                            <span>{recordingSeconds}s</span>
-                          </div>
-                          <div className="h-2 w-full rounded-full bg-[#E6E1D8] dark:bg-[#2A324B] overflow-hidden">
-                            <div
-                              style={{
-                                transform: `scaleX(${Math.max(0.08, micLevel)})`,
-                                transformOrigin: 'left center',
-                              }}
-                              className="h-full w-full bg-[#C84B58] dark:bg-[#E06D7A] transition-transform duration-75"
-                            />
-                          </div>
+                    {voiceNotice && !audioError && (
+                      <div
+                        role="status"
+                        className="p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] space-y-2.5"
+                      >
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#D98A1C] dark:text-[#E5A94C]" />
+                          <p className="leading-relaxed">{voiceNotice}</p>
                         </div>
-                      )}
-
-                      {isProcessingVoice && (
-                        <div className="flex items-center gap-2 text-xs text-[#2F7A5E] dark:text-[#5CA49B]">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>{studioStatus || 'Cleaning audio...'}</span>
-                        </div>
-                      )}
-
-                      {/* Primary Record / Stop Buttons */}
-                      {!previewDataUrl && !isProcessingVoice && (
-                        <div className="flex flex-wrap items-center gap-2">
-                          {!isRecording ? (
-                            <button
-                              type="button"
-                              onClick={() => void startParentRecording()}
-                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#C84B58] hover:bg-[#B33D4A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                            >
-                              <Mic className="w-3.5 h-3.5" />
-                              {hasParentRecording ? 'Record New Take' : 'Start Recording'}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={stopParentRecording}
-                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#24292E] dark:bg-[#EDE9DF] text-white dark:text-[#121624] text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                            >
-                              <Square className="w-3.5 h-3.5 fill-current" />
-                              Stop & Clean ({recordingSeconds}s)
-                            </button>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Preview & Boost Before Saving */}
-                      {previewDataUrl && !isProcessingVoice && (
-                        <div className="space-y-2.5">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => playDataUrlAudio(previewDataUrl, true)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#1A2033] text-xs font-semibold cursor-pointer"
-                            >
-                              <Play className="w-3.5 h-3.5" />
-                              Preview
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void handleToggleExtraBoost()}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer ${
-                                extraBoost
-                                  ? 'bg-[#2F7A5E]/15 dark:bg-[#E5A94C]/20 border-[#2F7A5E]/40 dark:border-[#E5A94C]/40 text-[#2F7A5E] dark:text-[#E5A94C]'
-                                  : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
-                              }`}
-                            >
-                              Clarity Boost: {extraBoost ? 'On' : 'Standard'}
-                            </button>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              disabled={isSavingVoiceClip}
-                              onClick={() => void handleSavePreviewClip()}
-                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-                            >
-                              {isSavingVoiceClip ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Check className="w-3.5 h-3.5" />
-                              )}
-                              {isSavingVoiceClip ? 'Saving...' : 'Save Voice Clip'}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={isSavingVoiceClip}
-                              onClick={() => {
-                                setPreviewDataUrl(null);
-                                setRawCapturedBlob(null);
-                                setStudioStatus(null);
-                              }}
-                              className="px-2.5 py-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] disabled:opacity-50 cursor-pointer"
-                            >
-                              Discard
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {studioStatus && !isProcessingVoice && (
-                        <p className="text-[11px] text-[#2F7A5E] dark:text-[#5CA49B]">
-                          {studioStatus}
-                        </p>
-                      )}
-
-                      {/* Clear Saved Parent Voice Controls */}
-                      {!isRecording && (hasParentRecording || studioStatus) && (
-                        <div className="pt-2.5 border-t border-[#E6E1D8] dark:border-[#2A324B] flex flex-wrap items-center justify-between gap-2 text-xs">
-                          {hasParentRecording && (
-                            <button
-                              type="button"
-                              disabled={clearingVoiceAction !== null}
-                              onClick={() => void clearParentRecording()}
-                              className="inline-flex items-center gap-1 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
-                            >
-                              {clearingVoiceAction === 'page' ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Trash2 className="w-3.5 h-3.5" />
-                              )}
-                              {clearingVoiceAction === 'page' ? 'Clearing...' : 'Clear This Page'}
-                            </button>
-                          )}
+                        <div className="flex flex-wrap items-center gap-2.5 pl-6">
                           <button
                             type="button"
-                            disabled={clearingVoiceAction !== null}
-                            onClick={() => void clearAllClipsInThisBook()}
-                            className="inline-flex items-center gap-1 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                            disabled={isLoadingAudio}
+                            onClick={handleRetryAiVoice}
+                            className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                           >
-                            {clearingVoiceAction === 'book' && (
+                            {isLoadingAudio ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3.5 h-3.5" />
                             )}
-                            {clearingVoiceAction === 'book'
-                              ? 'Clearing...'
-                              : 'Clear All Clips in Book'}
+                            {isLoadingAudio ? 'Retrying...' : 'Retry AI Voice'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setVoiceNotice(null)}
+                            className="min-h-[36px] px-2 py-1 font-medium opacity-80 hover:opacity-100 cursor-pointer"
+                          >
+                            Dismiss
                           </button>
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    )}
+
+                    {audioError && (
+                      <div
+                        role="alert"
+                        className="p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] space-y-2.5"
+                      >
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#C84B58] dark:text-[#F299A3]" />
+                          <p className="leading-relaxed">{audioError}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isLoadingAudio}
+                            onClick={handleRetryAiVoice}
+                            className="inline-flex items-center justify-center gap-1.5 flex-1 min-h-[40px] py-2 px-3 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] hover:bg-white dark:hover:bg-[#232B42] text-[#9C2F3B] dark:text-[#F299A3] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                          >
+                            {isLoadingAudio ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            )}
+                            {isLoadingAudio ? 'Retrying...' : 'Retry'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSwitchToDeviceVoiceAndPlay}
+                            className="flex-1 min-h-[40px] py-2 px-3 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                          >
+                            Use Device Voice
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Page Navigation Buttons (Large Kid-Friendly Touch Targets) */}
+                <div
+                  className="mt-5 pt-4 border-t border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3"
+                  data-no-swipe="true"
+                >
+                  <button
+                    type="button"
+                    disabled={safePageIndex === 0}
+                    onClick={() => goToPage(safePageIndex - 1)}
+                    className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 py-2.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] disabled:opacity-40 transition-all active:scale-[0.97] cursor-pointer"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => goToPage(safePageIndex + 1)}
+                    className="flex-1 inline-flex items-center justify-center gap-2 min-h-[48px] px-5 py-2.5 rounded-xl bg-[#24292E] hover:bg-[#363D44] dark:bg-[#5CA49B] dark:hover:bg-[#4A8F86] text-white dark:text-[#121624] text-sm font-semibold transition-all active:scale-[0.98] cursor-pointer"
+                  >
+                    {safePageIndex === totalPages - 1 ? 'Read Story Moral' : 'Next Page'}
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          ) : (
+            /* Celebratory End-of-Story Moral Spread */
+            <motion.section
+              key="moral-spread"
+              custom={pageDirection}
+              variants={pageTransitionVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={
+                reduced
+                  ? { duration: 0.08 }
+                  : { duration: 0.26, ease: [0.16, 1, 0.3, 1] }
+              }
+              className="max-w-4xl mx-auto bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl overflow-hidden watercolor-paper-frame"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-12 items-stretch">
+                <div className="md:col-span-5 relative min-h-[240px] bg-[#EFEBE2] dark:bg-[#151A2B]">
+                  {resolvedPageImage && (
+                    <img
+                      src={resolvedPageImage}
+                      alt={story.title}
+                      referrerPolicy="no-referrer"
+                      draggable={false}
+                      className="w-full h-full object-cover"
+                    />
                   )}
+                </div>
+
+                <div className="md:col-span-7 p-6 sm:p-9 flex flex-col justify-between">
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfettiBurstKey((k) => k + 1);
+                        playCharacterSound('twinkle', bedtimeSettings.bedtimeEnabled);
+                      }}
+                      className="inline-flex items-center gap-2 min-h-[36px] text-xs font-semibold text-[#D98A1C] dark:text-[#E5A94C] mb-2 hover:opacity-85 transition-opacity cursor-pointer"
+                      title="Tap to celebrate again"
+                    >
+                      <Star className="w-4 h-4 fill-current" />
+                      <span>Reading Star Earned</span>
+                      <span aria-hidden="true">·</span>
+                      <span>Moral of the Story</span>
+                    </button>
+
+                    <h2 className="font-display text-3xl sm:text-4xl font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-4">
+                      {story.moralTitle}
+                    </h2>
+
+                    <HighlightedText
+                      text={`“${story.moralLesson}”`}
+                      progress={audioProgress}
+                      isPlaying={isPlaying}
+                      className="font-display text-xl leading-relaxed mb-6"
+                    />
+
+                    {story.parentDiscussionPrompt && (
+                      <div className="p-4 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] mb-6">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] mb-1">
+                          <BookHeart className="w-3.5 h-3.5" />
+                          <span>Talk Together</span>
+                        </div>
+                        <p className="text-sm text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed">
+                          {story.parentDiscussionPrompt}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3" data-no-swipe="true">
+                    <button
+                      type="button"
+                      onClick={handleToggleNarration}
+                      disabled={isLoadingAudio}
+                      className="inline-flex items-center justify-center gap-2 min-h-[48px] px-5 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-all active:scale-[0.98] whitespace-nowrap disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {isLoadingAudio ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : isPlaying ? (
+                        <Pause className="w-4 h-4" />
+                      ) : (
+                        <Play className="w-4 h-4" />
+                      )}
+                      {isLoadingAudio
+                        ? 'Preparing Voice...'
+                        : isPlaying
+                          ? 'Pause Moral'
+                          : 'Listen to Moral'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => goToPage(0)}
+                      className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] transition-all active:scale-[0.98] whitespace-nowrap cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      Read Again
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleExitReader}
+                      className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 py-3 rounded-xl text-sm font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline whitespace-nowrap cursor-pointer"
+                    >
+                      <Check className="w-4 h-4" />
+                      Choose Another Book
+                    </button>
+                  </div>
 
                   {voiceNotice && !audioError && (
                     <div
                       role="status"
-                      className="mt-3 p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] space-y-2.5"
+                      className="mt-4 p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] flex flex-wrap items-center justify-between gap-2.5"
                     >
-                      <div className="flex items-start gap-2">
+                      <div className="flex items-start gap-2 min-w-0 flex-1">
                         <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#D98A1C] dark:text-[#E5A94C]" />
-                        <p className="leading-relaxed">{voiceNotice}</p>
+                        <span>{voiceNotice}</span>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2.5 pl-6">
+                      <div className="flex items-center gap-2 shrink-0">
                         <button
                           type="button"
                           disabled={isLoadingAudio}
                           onClick={handleRetryAiVoice}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                          className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                         >
                           {isLoadingAudio ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           ) : (
                             <RefreshCw className="w-3.5 h-3.5" />
                           )}
-                          {isLoadingAudio ? 'Retrying...' : 'Retry AI Voice'}
+                          {isLoadingAudio ? 'Retrying...' : 'Retry'}
                         </button>
                         <button
                           type="button"
                           onClick={() => setVoiceNotice(null)}
-                          className="px-2 py-1 font-medium opacity-80 hover:opacity-100 cursor-pointer"
+                          className="min-h-[36px] px-2 font-semibold underline cursor-pointer"
                         >
                           Dismiss
                         </button>
@@ -1621,18 +1784,18 @@ export function StoryReader({
                   {audioError && (
                     <div
                       role="alert"
-                      className="mt-3 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] space-y-2.5"
+                      className="mt-4 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] flex flex-wrap items-center justify-between gap-3"
                     >
-                      <div className="flex items-start gap-2">
+                      <div className="flex items-start gap-2 min-w-0 flex-1">
                         <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#C84B58] dark:text-[#F299A3]" />
-                        <p className="leading-relaxed">{audioError}</p>
+                        <span>{audioError}</span>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-2 shrink-0">
                         <button
                           type="button"
                           disabled={isLoadingAudio}
                           onClick={handleRetryAiVoice}
-                          className="inline-flex items-center justify-center gap-1.5 flex-1 py-2 px-3 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] hover:bg-white dark:hover:bg-[#232B42] text-[#9C2F3B] dark:text-[#F299A3] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                          className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] text-[#9C2F3B] dark:text-[#F299A3] font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                         >
                           {isLoadingAudio ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1644,7 +1807,7 @@ export function StoryReader({
                         <button
                           type="button"
                           onClick={handleSwitchToDeviceVoiceAndPlay}
-                          className="flex-1 py-2 px-3 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] font-semibold cursor-pointer"
                         >
                           Use Device Voice
                         </button>
@@ -1653,217 +1816,417 @@ export function StoryReader({
                   )}
                 </div>
               </div>
+            </motion.section>
+          )}
+        </AnimatePresence>
+      </div>
 
-              {/* Page Navigation Buttons (Large Kid-Friendly Touch Targets) */}
-              <div className="mt-6 pt-5 border-t border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3">
+      {/* Native Bottom Sheet: Voices & Reading Speed */}
+      <BottomSheet
+        open={activeSheet === 'voices'}
+        onClose={() => setActiveSheet(null)}
+        title="Voices & Reading Speed"
+        subtitle="Customize storytelling voice, pace, and automatic page turning"
+        reducedMotion={reduced}
+      >
+        <div>
+          <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+            Narration Engine
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={handleSwitchBackToAiVoice}
+              className={`min-h-[46px] py-2.5 px-3 rounded-xl text-xs font-semibold transition-colors active:scale-[0.98] cursor-pointer ${
+                voiceEngine === 'ai'
+                  ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                  : 'bg-white dark:bg-[#121624] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
+              }`}
+            >
+              AI Storyteller
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                stopAudio(true);
+                setAudioError(null);
+                setVoiceSource('ai');
+                onUpdateVoicePreferences({
+                  ...voicePreferences,
+                  voiceEngine: 'device',
+                });
+              }}
+              className={`min-h-[46px] py-2.5 px-3 rounded-xl text-xs font-semibold transition-colors active:scale-[0.98] cursor-pointer ${
+                voiceEngine === 'device'
+                  ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                  : 'bg-white dark:bg-[#121624] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
+              }`}
+            >
+              Device Voice (Free)
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+            {voiceEngine === 'device' ? 'Voice Tone Style' : 'AI Storyteller Voice'}
+          </div>
+          <div className="space-y-1.5">
+            {VOICE_PERSONAS.map((persona) => {
+              const active = voicePreferences.voicePersona === persona.id;
+              return (
                 <button
-                  type="button"
-                  disabled={pageIndex === 0}
-                  onClick={() => {
-                    pendingAutoStartRef.current = false;
-                    setPageIndex((i) => Math.max(0, i - 1));
-                  }}
-                  className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 py-2.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] disabled:opacity-40 transition-colors cursor-pointer"
-                >
-                  <ArrowLeft className="w-4 h-4" />
-                  Previous
-                </button>
-                <button
+                  key={persona.id}
                   type="button"
                   onClick={() => {
-                    pendingAutoStartRef.current = false;
-                    setPageIndex((i) => Math.min(totalPages, i + 1));
+                    stopAudio(true);
+                    setVoiceSource('ai');
+                    onUpdateVoicePreferences({
+                      ...voicePreferences,
+                      voicePersona: persona.id as VoicePersonaId,
+                    });
                   }}
-                  className="flex-1 inline-flex items-center justify-center gap-2 min-h-[48px] px-5 py-2.5 rounded-xl bg-[#24292E] hover:bg-[#363D44] dark:bg-[#5CA49B] dark:hover:bg-[#4A8F86] text-white dark:text-[#121624] text-sm font-semibold transition-colors cursor-pointer"
+                  className={`w-full min-h-[48px] text-left px-3.5 py-2.5 rounded-xl text-sm transition-colors cursor-pointer flex items-center justify-between gap-3 ${
+                    active
+                      ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] font-semibold border border-[#2F7A5E]/40 dark:border-[#E5A94C]/45 shadow-2xs'
+                      : 'bg-white/60 dark:bg-[#121624]/60 text-[#5C646B] dark:text-[#A4AEC2] border border-transparent hover:border-[#E6E1D8] dark:hover:border-[#2A324B]'
+                  }`}
                 >
-                  {pageIndex === totalPages - 1 ? 'Read Story Moral' : 'Next Page'}
-                  <ArrowRight className="w-4 h-4" />
+                  <span className="truncate">{persona.label}</span>
+                  <span className="text-xs opacity-75 truncate shrink-0">
+                    {persona.description.split(',')[0]}
+                  </span>
                 </button>
-              </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+            Reading Speed
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {SPEED_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() =>
+                  onUpdateVoicePreferences({
+                    ...voicePreferences,
+                    readingSpeed: opt.value,
+                  })
+                }
+                className={`min-h-[46px] py-2 px-2 rounded-xl text-xs font-semibold font-mono tabular-nums transition-colors active:scale-[0.98] cursor-pointer ${
+                  voicePreferences.readingSpeed === opt.value
+                    ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                    : 'bg-white dark:bg-[#121624] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={voicePreferences.autoRead}
+          onClick={() =>
+            onUpdateVoicePreferences({
+              ...voicePreferences,
+              autoRead: !voicePreferences.autoRead,
+            })
+          }
+          className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3 cursor-pointer"
+        >
+          <div className="text-left">
+            <div className="text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+              Hands-Free Auto-Read
             </div>
-          </motion.div>
-        ) : (
-          /* Celebratory End-of-Story Moral Spread */
-          <motion.section
-            key="moral-spread"
-            initial={reduced ? { opacity: 1 } : { opacity: 0, scale: 0.98 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="max-w-4xl mx-auto bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl overflow-hidden watercolor-paper-frame"
+            <div className="text-xs text-[#5C646B] dark:text-[#A4AEC2]">
+              Automatically turns to the next page when narration finishes
+            </div>
+          </div>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-xs font-semibold shrink-0 ${
+              voicePreferences.autoRead
+                ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                : 'bg-[#EFECE5] dark:bg-[#232B42] text-[#5C646B] dark:text-[#A4AEC2]'
+            }`}
           >
-            <div className="grid grid-cols-1 md:grid-cols-12 items-stretch">
-              <div className="md:col-span-5 relative min-h-[240px] bg-[#EFEBE2] dark:bg-[#151A2B]">
-                {resolvedPageImage && (
-                  <img
-                    src={resolvedPageImage}
-                    alt={story.title}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                )}
-              </div>
+            {voicePreferences.autoRead ? 'On' : 'Off'}
+          </span>
+        </button>
+      </BottomSheet>
 
-              <div className="md:col-span-7 p-7 sm:p-9 flex flex-col justify-between">
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfettiBurstKey((k) => k + 1);
-                      playCharacterSound('twinkle', bedtimeSettings.bedtimeEnabled);
-                    }}
-                    className="inline-flex items-center gap-2 text-xs font-semibold text-[#D98A1C] dark:text-[#E5A94C] mb-3 hover:opacity-85 transition-opacity cursor-pointer"
-                    title="Tap to celebrate again"
-                  >
-                    <Star className="w-4 h-4 fill-current" />
-                    <span>Reading Star Earned</span>
-                    <span aria-hidden="true">·</span>
-                    <span>Moral of the Story</span>
-                  </button>
+      {/* Native Bottom Sheet: Parent Voice Studio */}
+      <BottomSheet
+        open={activeSheet === 'recorder'}
+        onClose={() => {
+          if (isRecording) stopParentRecording();
+          setActiveSheet(null);
+        }}
+        title="Parent Voice Studio"
+        subtitle={
+          isMoralSpread
+            ? `Recording for Story Moral`
+            : `Recording for Page ${safePageIndex + 1} of ${totalPages}`
+        }
+        reducedMotion={reduced}
+      >
+        <p className="text-xs text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed">
+          Noise reduction & automatic vocal leveling keep your recording warm and crystal-clear for bedtime listening.
+        </p>
 
-                  <h2 className="font-display text-3xl sm:text-4xl font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-4">
-                    {story.moralTitle}
-                  </h2>
-
-                  <HighlightedText
-                    text={`“${story.moralLesson}”`}
-                    progress={audioProgress}
-                    isPlaying={isPlaying}
-                    className="font-display text-xl leading-relaxed mb-6"
-                  />
-
-                  {story.parentDiscussionPrompt && (
-                    <div className="p-4 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] mb-6">
-                      <div className="flex items-center gap-2 text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] mb-1">
-                        <BookHeart className="w-3.5 h-3.5" />
-                        <span>Talk Together</span>
-                      </div>
-                      <p className="text-sm text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed">
-                        {story.parentDiscussionPrompt}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={handleToggleNarration}
-                    disabled={isLoadingAudio}
-                    className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap disabled:opacity-65 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    {isLoadingAudio ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : isPlaying ? (
-                      <Pause className="w-4 h-4" />
-                    ) : (
-                      <Play className="w-4 h-4" />
-                    )}
-                    {isLoadingAudio
-                      ? 'Preparing Voice...'
-                      : isPlaying
-                        ? 'Pause Moral'
-                        : 'Listen to Moral'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      pendingAutoStartRef.current = false;
-                      setPageIndex(0);
-                    }}
-                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] transition-colors whitespace-nowrap cursor-pointer"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    Read Again
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      stopAudio(true);
-                      stopCharacterAudio();
-                      onExit();
-                    }}
-                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline whitespace-nowrap cursor-pointer"
-                  >
-                    <Check className="w-4 h-4" />
-                    Choose Another Book
-                  </button>
-                </div>
-
-                {voiceNotice && !audioError && (
-                  <div
-                    role="status"
-                    className="mt-4 p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] flex flex-wrap items-center justify-between gap-2.5"
-                  >
-                    <div className="flex items-start gap-2 min-w-0 flex-1">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#D98A1C] dark:text-[#E5A94C]" />
-                      <span>{voiceNotice}</span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        disabled={isLoadingAudio}
-                        onClick={handleRetryAiVoice}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-                      >
-                        {isLoadingAudio ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-3.5 h-3.5" />
-                        )}
-                        {isLoadingAudio ? 'Retrying...' : 'Retry'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setVoiceNotice(null)}
-                        className="font-semibold underline cursor-pointer"
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {audioError && (
-                  <div
-                    role="alert"
-                    className="mt-4 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] flex flex-wrap items-center justify-between gap-3"
-                  >
-                    <div className="flex items-start gap-2 min-w-0 flex-1">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#C84B58] dark:text-[#F299A3]" />
-                      <span>{audioError}</span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        disabled={isLoadingAudio}
-                        onClick={handleRetryAiVoice}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] text-[#9C2F3B] dark:text-[#F299A3] font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-                      >
-                        {isLoadingAudio ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-3.5 h-3.5" />
-                        )}
-                        {isLoadingAudio ? 'Retrying...' : 'Retry'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSwitchToDeviceVoiceAndPlay}
-                        className="px-3 py-1.5 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] font-semibold cursor-pointer"
-                      >
-                        Use Device Voice
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+        {/* Live Microphone Level Bar */}
+        {isRecording && (
+          <div className="p-4 rounded-2xl bg-white dark:bg-[#121624] border border-[#C84B58]/35">
+            <div className="flex items-center justify-between text-xs font-mono tabular-nums text-[#C84B58] dark:text-[#E06D7A] mb-2">
+              <span>Recording clearly...</span>
+              <span>{recordingSeconds}s</span>
             </div>
-          </motion.section>
+            <div className="h-2.5 w-full rounded-full bg-[#E6E1D8] dark:bg-[#2A324B] overflow-hidden">
+              <div
+                style={{
+                  transform: `scaleX(${Math.max(0.08, micLevel)})`,
+                  transformOrigin: 'left center',
+                }}
+                className="h-full w-full bg-[#C84B58] dark:bg-[#E06D7A] transition-transform duration-75"
+              />
+            </div>
+          </div>
         )}
-      </AnimatePresence>
+
+        {isProcessingVoice && (
+          <div className="p-4 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-2.5 text-sm text-[#2F7A5E] dark:text-[#5CA49B]">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>{studioStatus || 'Cleaning audio...'}</span>
+          </div>
+        )}
+
+        {/* Primary Record / Stop Buttons */}
+        {!previewDataUrl && !isProcessingVoice && (
+          <div>
+            {!isRecording ? (
+              <button
+                type="button"
+                onClick={() => void startParentRecording()}
+                className="w-full min-h-[52px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-[#C84B58] hover:bg-[#B33D4A] text-white text-sm font-semibold transition-all active:scale-[0.98] cursor-pointer"
+              >
+                <Mic className="w-4 h-4" />
+                {hasParentRecording ? 'Record New Take' : 'Start Recording'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopParentRecording}
+                className="w-full min-h-[52px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-[#24292E] dark:bg-[#EDE9DF] text-white dark:text-[#121624] text-sm font-semibold transition-all active:scale-[0.98] cursor-pointer"
+              >
+                <Square className="w-4 h-4 fill-current" />
+                Stop & Clean ({recordingSeconds}s)
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Preview & Boost Before Saving */}
+        {previewDataUrl && !isProcessingVoice && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => playDataUrlAudio(previewDataUrl, true)}
+                className="min-h-[46px] inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] bg-white dark:bg-[#121624] text-xs font-semibold cursor-pointer"
+              >
+                <Play className="w-4 h-4" />
+                Preview Take
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleToggleExtraBoost()}
+                className={`min-h-[46px] px-3 py-2 rounded-xl text-xs font-semibold border cursor-pointer ${
+                  extraBoost
+                    ? 'bg-[#2F7A5E]/15 dark:bg-[#E5A94C]/20 border-[#2F7A5E]/40 dark:border-[#E5A94C]/40 text-[#2F7A5E] dark:text-[#E5A94C]'
+                    : 'bg-white dark:bg-[#121624] border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
+                }`}
+              >
+                Clarity Boost: {extraBoost ? 'On' : 'Standard'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                disabled={isSavingVoiceClip}
+                onClick={() => void handleSavePreviewClip()}
+                className="min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {isSavingVoiceClip ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Check className="w-4 h-4" />
+                )}
+                {isSavingVoiceClip ? 'Saving...' : 'Save Clip'}
+              </button>
+              <button
+                type="button"
+                disabled={isSavingVoiceClip}
+                onClick={() => {
+                  setPreviewDataUrl(null);
+                  setRawCapturedBlob(null);
+                  setStudioStatus(null);
+                }}
+                className="min-h-[48px] px-4 py-2.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] disabled:opacity-50 cursor-pointer"
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+
+        {studioStatus && !isProcessingVoice && (
+          <p className="text-xs font-medium text-[#2F7A5E] dark:text-[#5CA49B]">
+            {studioStatus}
+          </p>
+        )}
+
+        {/* Clear Saved Parent Voice Controls */}
+        {!isRecording && (hasParentRecording || studioStatus) && (
+          <div className="pt-3 border-t border-[#E6E1D8] dark:border-[#2A324B] flex flex-wrap items-center justify-between gap-2 text-xs">
+            {hasParentRecording && (
+              <button
+                type="button"
+                disabled={clearingVoiceAction !== null}
+                onClick={() => void clearParentRecording()}
+                className="inline-flex items-center gap-1.5 min-h-[40px] px-2 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {clearingVoiceAction === 'page' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                {clearingVoiceAction === 'page' ? 'Clearing...' : 'Clear This Page'}
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={clearingVoiceAction !== null}
+              onClick={() => void clearAllClipsInThisBook()}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-2 font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+            >
+              {clearingVoiceAction === 'book' && (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              )}
+              {clearingVoiceAction === 'book' ? 'Clearing...' : 'Clear All Clips in Book'}
+            </button>
+          </div>
+        )}
+      </BottomSheet>
+
+      {/* Native Bottom Sheet: Reader Quick Options Menu */}
+      <BottomSheet
+        open={activeSheet === 'menu'}
+        onClose={() => setActiveSheet(null)}
+        title={story.title}
+        subtitle={`Ages ${story.ageGroup} · Moral: ${story.moralTitle}`}
+        reducedMotion={reduced}
+      >
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setActiveSheet('voices')}
+            className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+          >
+            <SlidersHorizontal className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+            <span>Voices & Reading Speed</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSheet('recorder')}
+            className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+          >
+            <Mic className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+            <span>{hasParentRecording ? 'Parent Voice Studio' : 'Record Parent Voice'}</span>
+          </button>
+
+          {story.isCustom && currentPage?.mediaId && resolvedPageImage && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveSheet(null);
+                setShowImageResizer(true);
+              }}
+              className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+            >
+              <Crop className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+              <span>Crop / Resize Page Image</span>
+            </button>
+          )}
+
+          {story.isCustom && onEditStory && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveSheet(null);
+                stopAudio(true);
+                stopCharacterAudio();
+                onEditStory(story);
+              }}
+              className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+            >
+              <Pencil className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+              <span>Edit Book in Studio</span>
+            </button>
+          )}
+
+          {onToggleBedtime && (
+            <button
+              type="button"
+              onClick={() => {
+                onToggleBedtime();
+                setActiveSheet(null);
+              }}
+              className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+            >
+              {bedtimeSettings.bedtimeEnabled ? (
+                <Sun className="w-4 h-4 text-[#E5A94C] shrink-0" />
+              ) : (
+                <Moon className="w-4 h-4 text-[#2F7A5E] shrink-0" />
+              )}
+              <span>
+                {bedtimeSettings.bedtimeEnabled ? 'Switch to Daytime Mode' : 'Switch to Bedtime Mode'}
+              </span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheet(null);
+              goToPage(0);
+            }}
+            className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+          >
+            <RotateCcw className="w-4 h-4 text-[#5C646B] dark:text-[#A4AEC2] shrink-0" />
+            <span>Restart Story from Page 1</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheet(null);
+              handleExitReader();
+            }}
+            className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-[#EFECE5] dark:bg-[#232B42] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4 shrink-0" />
+            <span>Back to Library</span>
+          </button>
+        </div>
+      </BottomSheet>
 
       {/* AI Voice Error Toast Notification with Quick Retry */}
       <AnimatePresence>
@@ -1875,7 +2238,7 @@ export function StoryReader({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={reduced ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.98 }}
             transition={{ duration: 0.2 }}
-            className="fixed bottom-5 right-5 z-50 max-w-sm w-[calc(100vw-2.5rem)] rounded-2xl bg-white dark:bg-[#1A2033] border border-[#D98A1C]/45 dark:border-[#E5A94C]/45 shadow-xl p-4"
+            className="fixed bottom-safe-toast right-4 left-4 sm:left-auto sm:right-5 z-50 sm:max-w-sm rounded-2xl bg-white dark:bg-[#1A2033] border border-[#D98A1C]/45 dark:border-[#E5A94C]/45 shadow-xl p-4"
           >
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 rounded-xl bg-[#D98A1C]/12 dark:bg-[#E5A94C]/15 text-[#D98A1C] dark:text-[#E5A94C] flex items-center justify-center shrink-0">
@@ -1902,7 +2265,7 @@ export function StoryReader({
                         handleRetryAiVoice();
                       }
                     }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                    className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                   >
                     {isLoadingAudio || characterVoiceLoading ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1914,7 +2277,7 @@ export function StoryReader({
                   <button
                     type="button"
                     onClick={dismissAiVoiceToast}
-                    className="px-2 py-1 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+                    className="min-h-[36px] px-2 py-1 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
                   >
                     Dismiss
                   </button>
@@ -1924,7 +2287,7 @@ export function StoryReader({
                 type="button"
                 onClick={dismissAiVoiceToast}
                 aria-label="Close voice notification"
-                className="p-1 rounded-lg text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+                className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1936,7 +2299,7 @@ export function StoryReader({
       {showImageResizer && currentPage?.mediaId && resolvedPageImage && (
         <PageImageFramingModal
           sourceImageUrl={resolvedPageImage}
-          pageLabel={`Page ${pageIndex + 1}`}
+          pageLabel={`Page ${safePageIndex + 1}`}
           onCancel={() => setShowImageResizer(false)}
           onApply={(framedUrl) => {
             void saveStoryMedia(story.id, currentPage.mediaId!, framedUrl).then(() => {

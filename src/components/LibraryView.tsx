@@ -162,7 +162,7 @@ export function LibraryView({
   };
 
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12">
+    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8 lg:py-10">
       {/* Bedtime Session Quiet Ribbon */}
       {bedtimeSettings.bedtimeEnabled && (
         <div className="mb-8 px-5 py-3.5 rounded-2xl bg-[#1A2033] border border-[#2A324B] flex flex-wrap items-center justify-between gap-4 text-sm text-[#EDE9DF]">
@@ -186,12 +186,12 @@ export function LibraryView({
       )}
 
       {/* Hero Split (Balanced 2-Column with items-stretch) */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch mb-12">
-        <div className="lg:col-span-6 flex flex-col justify-between bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-7 sm:p-9 watercolor-paper-frame">
+      <section className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-7 lg:gap-8 items-stretch mb-9 sm:mb-12">
+        <div className="lg:col-span-6 flex flex-col justify-between bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-5 sm:p-8 watercolor-paper-frame">
           <div>
             {activeChild && (
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-5 pb-4 border-b border-[#E6E1D8] dark:border-[#2A324B]">
-                <div className="flex items-center gap-2 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2]">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 mb-4 pb-3.5 border-b border-[#E6E1D8] dark:border-[#2A324B]">
+                <div className="flex items-center flex-wrap gap-2 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2]">
                   <span>Reading for {activeChild.name}</span>
                   <span aria-hidden="true">·</span>
                   <span>Ages {activeChild.ageGroup}</span>
@@ -202,13 +202,13 @@ export function LibraryView({
                   </span>
                 </div>
                 {childrenProfiles.length > 1 && (
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
                     {childrenProfiles.map((child) => (
                       <button
                         key={child.id}
                         type="button"
                         onClick={() => onSelectChild(child.id)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors active:scale-95 whitespace-nowrap cursor-pointer ${
                           child.id === activeChild.id
                             ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
                             : 'text-[#5C646B] dark:text-[#A4AEC2] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42]'
@@ -222,42 +222,44 @@ export function LibraryView({
               </div>
             )}
 
-            <h1 className="font-display text-3xl sm:text-4xl lg:text-[2.65rem] font-semibold leading-[1.14] text-[#24292E] dark:text-[#EDE9DF] mb-4">
+            <h1 className="font-display text-2xl sm:text-4xl lg:text-[2.6rem] font-semibold leading-[1.15] text-[#24292E] dark:text-[#EDE9DF] mb-3.5">
               {bedtimeSettings.bedtimeEnabled
                 ? 'Quiet watercolor tales for sleepy eyes'
                 : 'Warm watercolor stories ready to tap and hear'}
             </h1>
-            <p className="text-base text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed max-w-xl mb-7">
+            <p className="text-sm sm:text-base text-[#5C646B] dark:text-[#A4AEC2] leading-relaxed max-w-xl mb-6">
               Tap friendly characters on every page, listen with expressive AI voices or a parent’s
               own voice recording, and share a gentle moral at the end of every book.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2.5 sm:gap-3">
             <button
               type="button"
               onClick={() => onOpenStory(featuredStory)}
-              className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+              className="inline-flex items-center justify-center gap-2.5 min-h-[48px] px-5 py-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-sm font-semibold transition-all active:scale-[0.98] whitespace-nowrap cursor-pointer"
             >
-              <BookOpen className="w-4 h-4" />
-              Read “{featuredStory.title}”
+              <BookOpen className="w-4 h-4 shrink-0" />
+              <span className="truncate">Read “{featuredStory.title}”</span>
             </button>
-            <button
-              type="button"
-              onClick={onOpenScanner}
-              className="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F4EFE6] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Camera className="w-4 h-4" />
-              Scan Book
-            </button>
-            <button
-              type="button"
-              onClick={onOpenManualCreator}
-              className="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F4EFE6] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <PenLine className="w-4 h-4" />
-              Add Manually
-            </button>
+            <div className="grid grid-cols-2 sm:flex items-center gap-2.5 sm:gap-3">
+              <button
+                type="button"
+                onClick={onOpenScanner}
+                className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 sm:px-5 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F4EFE6] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-all active:scale-[0.98] whitespace-nowrap cursor-pointer"
+              >
+                <Camera className="w-4 h-4 shrink-0" />
+                Scan Book
+              </button>
+              <button
+                type="button"
+                onClick={onOpenManualCreator}
+                className="inline-flex items-center justify-center gap-2 min-h-[48px] px-4 sm:px-5 py-3 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F4EFE6] dark:hover:bg-[#232B42] text-[#24292E] dark:text-[#EDE9DF] text-sm font-semibold transition-all active:scale-[0.98] whitespace-nowrap cursor-pointer"
+              >
+                <PenLine className="w-4 h-4 shrink-0" />
+                Add Manually
+              </button>
+            </div>
           </div>
         </div>
 
@@ -321,16 +323,16 @@ export function LibraryView({
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search title or moral..."
                 aria-label="Search storybooks by title or moral lesson"
-                className="w-full pl-9 pr-9 py-2 rounded-xl bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] text-sm text-[#24292E] dark:text-[#EDE9DF] placeholder:text-[#5C646B]/75 dark:placeholder:text-[#A4AEC2]/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#2F7A5E] dark:focus-visible:outline-[#E5A94C]"
+                className="w-full min-h-[44px] pl-9 pr-10 py-2 rounded-xl bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] text-sm text-[#24292E] dark:text-[#EDE9DF] placeholder:text-[#5C646B]/75 dark:placeholder:text-[#A4AEC2]/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#2F7A5E] dark:focus-visible:outline-[#E5A94C]"
               />
               {searchQuery && (
                 <button
                   type="button"
                   onClick={() => setSearchQuery('')}
                   aria-label="Clear search"
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               )}
             </div>
@@ -338,7 +340,7 @@ export function LibraryView({
             <div
               role="tablist"
               aria-label="Filter stories by age group"
-              className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#EFECE5] dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] self-start sm:self-auto"
+              className="flex items-center gap-1 p-1 rounded-xl bg-[#EFECE5] dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] overflow-x-auto no-scrollbar max-w-full"
             >
               {(
                 [
@@ -356,7 +358,7 @@ export function LibraryView({
                     role="tab"
                     aria-selected={active}
                     onClick={() => setFilter(tab.id)}
-                    className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    className={`min-h-[38px] px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors active:scale-95 whitespace-nowrap shrink-0 cursor-pointer ${
                       active
                         ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-xs'
                         : 'text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
@@ -427,7 +429,7 @@ export function LibraryView({
             </div>
           )
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 sm:gap-6">
             {filteredStories.map((story) => {
               const storyIsPublished = Boolean(
                 story.isPublished || publishedStoryIds?.has(story.id)

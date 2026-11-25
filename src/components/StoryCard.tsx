@@ -73,7 +73,7 @@ export function StoryCard({
   );
 
   return (
-    <article className="group flex flex-col bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
+    <article className="group flex flex-col bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl overflow-hidden transition-transform duration-200 hover:-translate-y-0.5 active:scale-[0.99]">
       <button
         type="button"
         onClick={() => onSelect(story)}
@@ -138,7 +138,7 @@ export function StoryCard({
       </button>
 
       {(showCustomFooter || showAdminPublishFooter) && (
-        <div className="px-5 pb-4 -mt-1 space-y-2.5">
+        <div className="px-5 pb-4 -mt-1 space-y-2">
           {showCustomFooter && (
             <div className="flex items-center justify-between gap-3">
               {onEditCustom ? (
@@ -148,7 +148,7 @@ export function StoryCard({
                     e.stopPropagation();
                     onEditCustom(story);
                   }}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 min-h-[40px] py-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline transition-colors cursor-pointer"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                   Edit Book
@@ -171,7 +171,7 @@ export function StoryCard({
                       setIsDeleting(false);
                     }
                   }}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                  className="inline-flex items-center gap-1.5 min-h-[40px] py-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isDeleting ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -200,7 +200,7 @@ export function StoryCard({
                       setIsPublishingAction(false);
                     }
                   }}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] hover:border-[#C84B58]/40 transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                  className="w-full min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] hover:border-[#C84B58]/40 transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isPublishingAction ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -223,7 +223,7 @@ export function StoryCard({
                       setIsPublishingAction(false);
                     }
                   }}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E]/10 hover:bg-[#2F7A5E]/18 dark:bg-[#E5A94C]/15 dark:hover:bg-[#E5A94C]/25 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                  className="w-full min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-[#2F7A5E]/10 hover:bg-[#2F7A5E]/18 dark:bg-[#E5A94C]/15 dark:hover:bg-[#E5A94C]/25 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] transition-colors active:scale-[0.98] disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isPublishingAction ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

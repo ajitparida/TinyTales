@@ -1913,27 +1913,27 @@ export function StoryScanner({
   const remainingPageSlots = Math.max(0, MAX_STORY_PAGES - reviewedPages.length);
 
   return (
-    <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-10">
-      <div className="flex items-center justify-between gap-4 mb-6">
+    <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8 lg:py-10">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <button
           type="button"
           onClick={() => {
             stopCameraStream();
             onCancel();
           }}
-          className="inline-flex items-center gap-2 text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+          className="inline-flex items-center gap-2 min-h-[40px] text-sm font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4" />
           {isEditMode ? 'Cancel Editing' : 'Back to Library'}
         </button>
 
         <div className="text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2]">
-          {isSignedIn ? 'Cloud Sync Active' : 'Saved on This Device (Sign in to sync)'}
+          {isSignedIn ? 'Cloud Sync Active' : 'Saved on This Device'}
         </div>
       </div>
 
       <div className="mb-6">
-        <h1 className="font-display text-3xl sm:text-4xl font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-2">
+        <h1 className="font-display text-2xl sm:text-4xl font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-2">
           {isEditMode
             ? `Edit Storybook · ${editingStory?.title}`
             : createMode === 'manual'
@@ -1953,35 +1953,37 @@ export function StoryScanner({
           <div
             role="tablist"
             aria-label="Choose how to add a storybook"
-            className="mt-5 inline-flex items-center gap-1 p-1 rounded-xl bg-[#EFECE5] dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B]"
+            className="mt-5 grid grid-cols-2 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-[#EFECE5] dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] w-full sm:w-auto"
           >
             <button
               type="button"
               role="tab"
               aria-selected={createMode === 'scan'}
               onClick={() => handleSwitchCreateMode('scan')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              className={`inline-flex items-center justify-center gap-2 min-h-[44px] px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors active:scale-[0.98] whitespace-nowrap cursor-pointer ${
                 createMode === 'scan'
                   ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-xs'
                   : 'text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
               }`}
             >
-              <Camera className="w-4 h-4" />
-              Scan Photos / Screenshots
+              <Camera className="w-4 h-4 shrink-0" />
+              <span className="sm:hidden">Scan Photos</span>
+              <span className="hidden sm:inline">Scan Photos / Screenshots</span>
             </button>
             <button
               type="button"
               role="tab"
               aria-selected={createMode === 'manual'}
               onClick={() => handleSwitchCreateMode('manual')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+              className={`inline-flex items-center justify-center gap-2 min-h-[44px] px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors active:scale-[0.98] whitespace-nowrap cursor-pointer ${
                 createMode === 'manual'
                   ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF] shadow-xs'
                   : 'text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
               }`}
             >
-              <PenLine className="w-4 h-4" />
-              Write Manually (Text &amp; Images)
+              <PenLine className="w-4 h-4 shrink-0" />
+              <span className="sm:hidden">Write Manually</span>
+              <span className="hidden sm:inline">Write Manually (Text &amp; Images)</span>
             </button>
           </div>
         )}

@@ -225,8 +225,8 @@ export function ParentalDashboard({
 
   if (!isGateUnlocked) {
     return (
-      <main className="max-w-md mx-auto px-4 py-16">
-        <div className="bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-8 text-center">
+      <main className="max-w-md mx-auto px-4 py-8 sm:py-16">
+        <div className="bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl p-6 sm:p-8 text-center">
           <div className="w-12 h-12 rounded-xl bg-[#2F7A5E]/10 dark:bg-[#E5A94C]/15 text-[#2F7A5E] dark:text-[#E5A94C] flex items-center justify-center mx-auto mb-4">
             <Lock className="w-6 h-6" />
           </div>
@@ -250,7 +250,7 @@ export function ParentalDashboard({
                 setGateError(false);
               }}
               placeholder="Enter answer"
-              className="w-full px-4 py-3 text-center rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#D8D1C4] dark:border-[#34405E] text-base font-mono tabular-nums"
+              className="w-full min-h-[48px] px-4 py-3 text-center rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#D8D1C4] dark:border-[#34405E] text-base font-mono tabular-nums"
               autoFocus
             />
             {gateError && (
@@ -262,13 +262,13 @@ export function ParentalDashboard({
               <button
                 type="button"
                 onClick={onBackToLibrary}
-                className="flex-1 py-2.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold cursor-pointer"
+                className="flex-1 min-h-[48px] py-2.5 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] text-sm font-semibold active:scale-[0.98] transition-transform cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold cursor-pointer"
+                className="flex-1 min-h-[48px] py-2.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] text-white dark:text-[#121624] text-sm font-semibold active:scale-[0.98] transition-transform cursor-pointer"
               >
                 Enter Dashboard
               </button>
@@ -280,19 +280,19 @@ export function ParentalDashboard({
   }
 
   return (
-    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-10 space-y-8">
+    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8 lg:py-10 space-y-6 sm:space-y-8">
       {/* Header Row */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <button
             type="button"
             onClick={onBackToLibrary}
-            className="inline-flex items-center gap-2 text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] mb-2 cursor-pointer"
+            className="inline-flex items-center gap-2 min-h-[36px] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] mb-1 cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             Return to Child Library
           </button>
-          <h1 className="font-display text-3xl font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+          <h1 className="font-display text-2xl sm:text-3xl font-semibold text-[#24292E] dark:text-[#EDE9DF]">
             Parental Dashboard
           </h1>
         </div>

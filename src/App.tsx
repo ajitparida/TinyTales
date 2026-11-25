@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { AnimatePresence, motion } from 'motion/react';
 import { CURATED_STORIES } from './data/curatedStories';
 import {
   auth,
@@ -37,11 +38,24 @@ import {
 } from './types/story';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TopBar } from './components/TopBar';
+import { MobileBottomNav } from './components/MobileBottomNav';
+import { IpadSidebarRail } from './components/IpadSidebarRail';
 import { LibraryView } from './components/LibraryView';
 import { StoryReader } from './components/StoryReader';
 import { StoryScanner } from './components/StoryScanner';
 import { ParentalDashboard } from './components/ParentalDashboard';
 import { BedtimeCompleteOverlay } from './components/BedtimeCompleteOverlay';
+
+type NavTransitionType = 'tab-forward' | 'tab-backward' | 'push' | 'pop';
+
+const TAB_ORDER: Record<AppView, number> = {
+  library: 0,
+  reader: 0,
+  scanner: 1,
+  parents: 2,
+};
+
+const LOCAL_IPAD_SIDEBAR_KEY = 'meadowtale_ipad_sidebar_v1';
 
 const LOCAL_CHILDREN_KEY = 'meadowtale_local_children_v1';
 const LOCAL_STORIES_KEY = 'meadowtale_local_stories_v1';
@@ -95,10 +109,56 @@ function MeadowtaleApp() {
   const [publishedStories, setPublishedStories] = useState<Story[]>([]);
 
   const [activeView, setActiveView] = useState<AppView>('library');
+  const [navTransition, setNavTransition] = useState<NavTransitionType>('tab-forward');
+  const [ipadSidebarExpanded, setIpadSidebarExpanded] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_IPAD_SIDEBAR_KEY);
+      if (saved === 'true') return true;
+      if (saved === 'false') return false;
+    } catch {
+      // Ignore storage access issues
+    }
+    return typeof window !== 'undefined' ? window.innerWidth >= 1024 : true;
+  });
   const [selectedStory, setSelectedStory] = useState<Story | null>(null);
   const [editingStory, setEditingStory] = useState<Story | null>(null);
   const [scannerCreateMode, setScannerCreateMode] = useState<'scan' | 'manual'>('scan');
   const [isParentGateUnlocked, setIsParentGateUnlocked] = useState(false);
+
+  const navigateToView = useCallback(
+    (nextView: AppView, explicitTransition?: NavTransitionType) => {
+      setActiveView((prevView) => {
+        if (explicitTransition) {
+          setNavTransition(explicitTransition);
+        } else if (nextView === 'reader') {
+          setNavTransition('push');
+        } else if (prevView === 'reader') {
+          setNavTransition('pop');
+        } else {
+          setNavTransition(
+            TAB_ORDER[nextView] >= TAB_ORDER[prevView] ? 'tab-forward' : 'tab-backward'
+          );
+        }
+        return nextView;
+      });
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'auto' });
+      }
+    },
+    []
+  );
+
+  const handleToggleIpadSidebar = useCallback(() => {
+    setIpadSidebarExpanded((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(LOCAL_IPAD_SIDEBAR_KEY, String(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
 
   const [childrenProfiles, setChildrenProfiles] = useState<ChildProfile[]>(() =>
     readLocalJson(LOCAL_CHILDREN_KEY, DEFAULT_GUEST_CHILDREN)
@@ -248,7 +308,7 @@ function MeadowtaleApp() {
     }
   }, [user, childrenProfiles, customStories, readingLogs, bedtimeSettings]);
 
-  // Apply Bedtime Twilight dark mode & reduced motion classes to <html>
+  // Apply Bedtime Twilight dark mode, reduced motion & mobile status-bar theme-color
   useEffect(() => {
     const root = document.documentElement;
     if (bedtimeSettings.bedtimeEnabled) {
@@ -260,6 +320,10 @@ function MeadowtaleApp() {
       root.classList.add('reduced-motion-mode');
     } else {
       root.classList.remove('reduced-motion-mode');
+    }
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeMeta) {
+      themeMeta.setAttribute('content', bedtimeSettings.bedtimeEnabled ? '#121624' : '#2F7A5E');
     }
   }, [bedtimeSettings.bedtimeEnabled, bedtimeSettings.reducedMotion]);
 
@@ -522,7 +586,7 @@ function MeadowtaleApp() {
 
       setEditingStory(null);
       setSelectedStory(story);
-      setActiveView('reader');
+      navigateToView('reader', 'push');
       showToast(`Updated “${story.title}”${publishSuffix}!`);
       return;
     }
@@ -542,13 +606,13 @@ function MeadowtaleApp() {
 
     setEditingStory(null);
     setSelectedStory(story);
-    setActiveView('reader');
+    navigateToView('reader', 'push');
     showToast(`Saved “${story.title}”${publishSuffix}!`);
   };
 
   const handleOpenEditCustomStory = (story: Story) => {
     setEditingStory(story);
-    setActiveView('scanner');
+    navigateToView('scanner', 'push');
   };
 
   const handleDeleteCustomStory = async (story: Story) => {
@@ -582,8 +646,35 @@ function MeadowtaleApp() {
     ? Math.max(0, bedtimeSettings.maxStoriesPerSession - bedtimeStoriesReadThisSession)
     : null;
 
+  const isImmersiveReader = activeView === 'reader' && Boolean(selectedStory);
+  const reducedMotion = Boolean(bedtimeSettings.bedtimeEnabled && bedtimeSettings.reducedMotion);
+
+  const handlePrimaryNavigate = useCallback(
+    (view: AppView) => {
+      navigateToView(view);
+      if (view !== 'reader') setSelectedStory(null);
+      if (view !== 'scanner') setEditingStory(null);
+    },
+    [navigateToView]
+  );
+
+  const viewSlideOffset = useMemo(() => {
+    if (reducedMotion) return { enterX: 0, exitX: 0 };
+    switch (navTransition) {
+      case 'push':
+        return { enterX: 32, exitX: -20 };
+      case 'pop':
+        return { enterX: -28, exitX: 24 };
+      case 'tab-backward':
+        return { enterX: -22, exitX: 22 };
+      case 'tab-forward':
+      default:
+        return { enterX: 22, exitX: -22 };
+    }
+  }, [navTransition, reducedMotion]);
+
   return (
-    <div className="min-h-screen flex flex-col bg-[#FAF8F4] dark:bg-[#121624] text-[#24292E] dark:text-[#EDE9DF] relative">
+    <div className="min-h-[100dvh] flex flex-col md:flex-row xl:flex-col bg-[#FAF8F4] dark:bg-[#121624] text-[#24292E] dark:text-[#EDE9DF] relative overflow-x-clip">
       {/* Bedtime Warm Dimness Scrim (pointer-events-none so interactions remain unobstructed) */}
       {bedtimeSettings.bedtimeEnabled && bedtimeSettings.bedtimeDimness > 0 && (
         <div
@@ -593,128 +684,181 @@ function MeadowtaleApp() {
         />
       )}
 
-      <TopBar
-        activeView={activeView}
-        bedtimeEnabled={bedtimeSettings.bedtimeEnabled}
-        user={user}
-        authLoading={authLoading}
-        onNavigate={(view) => {
-          setActiveView(view);
-          if (view !== 'reader') setSelectedStory(null);
-          if (view !== 'scanner') setEditingStory(null);
-        }}
-        onToggleBedtime={handleToggleBedtime}
-        onSignIn={() => void handleSignIn()}
-        onOpenParents={() => setActiveView('parents')}
-      />
+      {/* Tablet / iPad Collapsible Left Sidebar Rail (768px–1279px), auto-hidden in Immersive Reader */}
+      {!isImmersiveReader && (
+        <IpadSidebarRail
+          activeView={activeView}
+          expanded={ipadSidebarExpanded}
+          bedtimeEnabled={bedtimeSettings.bedtimeEnabled}
+          user={user}
+          authLoading={authLoading}
+          reducedMotion={reducedMotion}
+          onToggleExpanded={handleToggleIpadSidebar}
+          onNavigate={handlePrimaryNavigate}
+          onToggleBedtime={handleToggleBedtime}
+          onSignIn={() => void handleSignIn()}
+          onOpenParents={() => handlePrimaryNavigate('parents')}
+        />
+      )}
 
-      <div className="flex-1">
-        {activeView === 'library' && (
-          <LibraryView
-            curatedStories={publicCatalogStories}
-            customStories={customStories}
-            cloudSyncKey={user?.uid || ''}
-            isAdmin={isAdmin}
-            publishedStoryIds={publishedStoryIds}
-            childrenProfiles={childrenProfiles}
-            activeChildId={activeChildId}
-            readingLogs={readingLogs}
-            bedtimeSettings={bedtimeSettings}
-            sleepRemainingSeconds={sleepRemainingSeconds}
-            bedtimeStoriesLeft={bedtimeStoriesLeft}
-            onSelectChild={setActiveChildId}
-            onOpenStory={(story) => {
-              setSelectedStory(story);
-              setActiveView('reader');
-            }}
-            onOpenScanner={() => {
-              setEditingStory(null);
-              setScannerCreateMode('scan');
-              setActiveView('scanner');
-            }}
-            onOpenManualCreator={() => {
-              setEditingStory(null);
-              setScannerCreateMode('manual');
-              setActiveView('scanner');
-            }}
-            onEditCustomStory={handleOpenEditCustomStory}
-            onDeleteCustomStory={handleDeleteCustomStory}
-            onPublishCustomStory={handlePublishCustomStory}
-            onUnpublishCustomStory={handleUnpublishCustomStory}
-          />
-        )}
-
-        {activeView === 'reader' && selectedStory && (
-          <StoryReader
-            story={selectedStory}
-            cloudSyncKey={user?.uid || ''}
-            bedtimeSettings={bedtimeSettings}
-            voicePreferences={voicePreferences}
-            onUpdateVoicePreferences={setVoicePreferences}
-            onEditStory={selectedStory.isCustom ? handleOpenEditCustomStory : undefined}
-            onExit={() => {
-              setSelectedStory(null);
-              setActiveView('library');
-            }}
-            onStoryCompleted={handleStoryCompleted}
-          />
-        )}
-
-        {activeView === 'scanner' && (
-          <StoryScanner
-            key={editingStory ? `edit_${editingStory.id}` : `create_${scannerCreateMode}`}
-            defaultAgeGroup={activeChild?.ageGroup || '2-3'}
-            isSignedIn={Boolean(user)}
-            isAdmin={isAdmin}
-            isAlreadyPublished={Boolean(editingStory && publishedStoryIds.has(editingStory.id))}
-            editingStory={editingStory}
-            initialCreateMode={scannerCreateMode}
-            onCancel={() => {
-              if (editingStory && selectedStory?.id === editingStory.id) {
-                setEditingStory(null);
-                setActiveView('reader');
-              } else {
-                setEditingStory(null);
-                setActiveView('library');
-              }
-            }}
-            onSaveStory={handleSaveScannedStory}
-          />
-        )}
-
-        {activeView === 'parents' && (
-          <ParentalDashboard
+      <div className="flex-1 min-w-0 flex flex-col min-h-[100dvh]">
+        {/* Mobile Slim Top Header (< 768px) & Editorial Desktop Header (>= 1280px), auto-hidden in Immersive Reader */}
+        {!isImmersiveReader && (
+          <TopBar
+            activeView={activeView}
+            bedtimeEnabled={bedtimeSettings.bedtimeEnabled}
             user={user}
             authLoading={authLoading}
-            isGateUnlocked={isParentGateUnlocked}
-            childrenProfiles={childrenProfiles}
-            activeChildId={activeChildId}
-            readingLogs={readingLogs}
-            allStories={[...customStories, ...publicCatalogStories]}
-            bedtimeSettings={bedtimeSettings}
-            voicePreferences={voicePreferences}
-            onUnlockGate={() => setIsParentGateUnlocked(true)}
-            onBackToLibrary={() => setActiveView('library')}
+            onNavigate={handlePrimaryNavigate}
+            onToggleBedtime={handleToggleBedtime}
             onSignIn={() => void handleSignIn()}
-            onSignOut={() => void handleSignOut()}
-            onSelectChild={setActiveChildId}
-            onAddChild={handleAddChild}
-            onDeleteChild={handleDeleteChild}
-            onUpdateBedtimeSettings={handleUpdateBedtimeSettings}
-            onUpdateVoicePreferences={setVoicePreferences}
+            onOpenParents={() => handlePrimaryNavigate('parents')}
           />
+        )}
+
+        {/* Direction-Aware Native Screen Transition Stage */}
+        <div className={`flex-1 min-w-0 ${!isImmersiveReader ? 'pb-mobile-nav md:pb-0' : 'pb-safe'}`}>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={activeView === 'reader' ? `reader_${selectedStory?.id || 'none'}` : activeView}
+              initial={
+                reducedMotion
+                  ? { opacity: 1 }
+                  : { opacity: 0, x: viewSlideOffset.enterX }
+              }
+              animate={{ opacity: 1, x: 0 }}
+              exit={
+                reducedMotion
+                  ? { opacity: 0 }
+                  : { opacity: 0, x: viewSlideOffset.exitX }
+              }
+              transition={
+                reducedMotion
+                  ? { duration: 0.08 }
+                  : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
+              }
+              className="w-full"
+            >
+              {activeView === 'library' && (
+                <LibraryView
+                  curatedStories={publicCatalogStories}
+                  customStories={customStories}
+                  cloudSyncKey={user?.uid || ''}
+                  isAdmin={isAdmin}
+                  publishedStoryIds={publishedStoryIds}
+                  childrenProfiles={childrenProfiles}
+                  activeChildId={activeChildId}
+                  readingLogs={readingLogs}
+                  bedtimeSettings={bedtimeSettings}
+                  sleepRemainingSeconds={sleepRemainingSeconds}
+                  bedtimeStoriesLeft={bedtimeStoriesLeft}
+                  onSelectChild={setActiveChildId}
+                  onOpenStory={(story) => {
+                    setSelectedStory(story);
+                    navigateToView('reader', 'push');
+                  }}
+                  onOpenScanner={() => {
+                    setEditingStory(null);
+                    setScannerCreateMode('scan');
+                    navigateToView('scanner', 'tab-forward');
+                  }}
+                  onOpenManualCreator={() => {
+                    setEditingStory(null);
+                    setScannerCreateMode('manual');
+                    navigateToView('scanner', 'tab-forward');
+                  }}
+                  onEditCustomStory={handleOpenEditCustomStory}
+                  onDeleteCustomStory={handleDeleteCustomStory}
+                  onPublishCustomStory={handlePublishCustomStory}
+                  onUnpublishCustomStory={handleUnpublishCustomStory}
+                />
+              )}
+
+              {activeView === 'reader' && selectedStory && (
+                <StoryReader
+                  story={selectedStory}
+                  cloudSyncKey={user?.uid || ''}
+                  bedtimeSettings={bedtimeSettings}
+                  voicePreferences={voicePreferences}
+                  onUpdateVoicePreferences={setVoicePreferences}
+                  onToggleBedtime={handleToggleBedtime}
+                  onEditStory={selectedStory.isCustom ? handleOpenEditCustomStory : undefined}
+                  onExit={() => {
+                    setSelectedStory(null);
+                    navigateToView('library', 'pop');
+                  }}
+                  onStoryCompleted={handleStoryCompleted}
+                />
+              )}
+
+              {activeView === 'scanner' && (
+                <StoryScanner
+                  key={editingStory ? `edit_${editingStory.id}` : `create_${scannerCreateMode}`}
+                  defaultAgeGroup={activeChild?.ageGroup || '2-3'}
+                  isSignedIn={Boolean(user)}
+                  isAdmin={isAdmin}
+                  isAlreadyPublished={Boolean(editingStory && publishedStoryIds.has(editingStory.id))}
+                  editingStory={editingStory}
+                  initialCreateMode={scannerCreateMode}
+                  onCancel={() => {
+                    if (editingStory && selectedStory?.id === editingStory.id) {
+                      setEditingStory(null);
+                      navigateToView('reader', 'pop');
+                    } else {
+                      setEditingStory(null);
+                      navigateToView('library', 'pop');
+                    }
+                  }}
+                  onSaveStory={handleSaveScannedStory}
+                />
+              )}
+
+              {activeView === 'parents' && (
+                <ParentalDashboard
+                  user={user}
+                  authLoading={authLoading}
+                  isGateUnlocked={isParentGateUnlocked}
+                  childrenProfiles={childrenProfiles}
+                  activeChildId={activeChildId}
+                  readingLogs={readingLogs}
+                  allStories={[...customStories, ...publicCatalogStories]}
+                  bedtimeSettings={bedtimeSettings}
+                  voicePreferences={voicePreferences}
+                  onUnlockGate={() => setIsParentGateUnlocked(true)}
+                  onBackToLibrary={() => navigateToView('library', 'tab-backward')}
+                  onSignIn={() => void handleSignIn()}
+                  onSignOut={() => void handleSignOut()}
+                  onSelectChild={setActiveChildId}
+                  onAddChild={handleAddChild}
+                  onDeleteChild={handleDeleteChild}
+                  onUpdateBedtimeSettings={handleUpdateBedtimeSettings}
+                  onUpdateVoicePreferences={setVoicePreferences}
+                />
+              )}
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
+        {/* Quiet Editorial Footer (shown on tablet & desktop outside Immersive Reader) */}
+        {!isImmersiveReader && (
+          <footer className="hidden md:block border-t border-[#E6E1D8] dark:border-[#2A324B] mt-12">
+            <div className="max-w-7xl mx-auto px-6 lg:px-8 py-6 flex flex-wrap items-center justify-between gap-4 text-xs text-[#5C646B] dark:text-[#A4AEC2]">
+              <span className="font-display font-semibold text-sm text-[#24292E] dark:text-[#EDE9DF]">
+                Meadowtale
+              </span>
+              <span>Gentle illustrated picture books for ages 2–5, crafted with a moral in every tale.</span>
+            </div>
+          </footer>
         )}
       </div>
 
-      {/* Quiet Editorial Footer */}
-      <footer className="border-t border-[#E6E1D8] dark:border-[#2A324B] mt-12">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-wrap items-center justify-between gap-4 text-xs text-[#5C646B] dark:text-[#A4AEC2]">
-          <span className="font-display font-semibold text-sm text-[#24292E] dark:text-[#EDE9DF]">
-            Meadowtale
-          </span>
-          <span>Gentle illustrated picture books for ages 2–5, crafted with a moral in every tale.</span>
-        </div>
-      </footer>
+      {/* Native Mobile Bottom Tab Bar (< 768px), automatically hidden in Immersive Story Reader */}
+      <MobileBottomNav
+        activeView={activeView}
+        hidden={isImmersiveReader}
+        reducedMotion={reducedMotion}
+        onNavigate={handlePrimaryNavigate}
+      />
 
       {/* Bedtime Completion Screen */}
       {bedtimeLockReason && (
@@ -737,15 +881,23 @@ function MeadowtaleApp() {
         />
       )}
 
-      {/* Subtle Toast Confirmation */}
-      {toastMessage && (
-        <div
-          role="status"
-          className="fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl bg-[#24292E] dark:bg-[#EDE9DF] text-white dark:text-[#121624] text-sm font-medium shadow-lg"
-        >
-          {toastMessage}
-        </div>
-      )}
+      {/* Subtle Toast Confirmation (clears mobile bottom tab bar automatically) */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            role="status"
+            initial={reducedMotion ? { opacity: 1 } : { opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
+            transition={{ duration: 0.18 }}
+            className={`fixed right-4 left-4 sm:left-auto sm:right-5 z-50 sm:max-w-sm px-4 py-3 rounded-2xl bg-[#24292E] dark:bg-[#EDE9DF] text-white dark:text-[#121624] text-sm font-medium shadow-lg ${
+              isImmersiveReader ? 'bottom-safe-toast' : 'bottom-mobile-toast md:bottom-safe-toast'
+            }`}
+          >
+            {toastMessage}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { User } from 'firebase/auth';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Moon, Sun } from 'lucide-react';
 import { AppView } from '../types/story';
 
 interface TopBarProps {
@@ -30,10 +30,60 @@ export function TopBar({
         : 'text-[#5C646B] dark:text-[#A4AEC2] border-transparent hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
     }`;
 
+  const firstName = user?.displayName?.split(' ')[0] || 'Account';
+
   return (
-    <header className="sticky top-0 z-30 bg-[#FAF8F4]/95 dark:bg-[#121624]/95 backdrop-blur-sm border-b border-[#E6E1D8] dark:border-[#2A324B]">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Single-line wordmark */}
+    <header className="md:hidden xl:block sticky top-0 z-30 bg-[#FAF8F4]/92 dark:bg-[#121624]/92 backdrop-blur-md border-b border-[#E6E1D8] dark:border-[#2A324B] pt-safe">
+      {/* Compact Native Mobile Header (< 768px): 52px height to stay strictly under 15% mobile sticky cap */}
+      <div className="xl:hidden px-4 h-[52px] flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => onNavigate('library')}
+          className="font-display text-lg font-bold tracking-tight text-[#24292E] dark:text-[#EDE9DF] whitespace-nowrap shrink-0 min-h-[44px] flex items-center cursor-pointer"
+        >
+          Meadowtale
+        </button>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Quick Bedtime Mode Moon/Sun Toggle */}
+          <button
+            type="button"
+            onClick={onToggleBedtime}
+            aria-label={bedtimeEnabled ? 'Switch to Daytime Mode' : 'Switch to Bedtime Mode'}
+            aria-pressed={bedtimeEnabled}
+            className={`min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center transition-colors active:scale-95 cursor-pointer ${
+              bedtimeEnabled
+                ? 'bg-[#E5A94C]/18 text-[#E5A94C]'
+                : 'text-[#5C646B] dark:text-[#A4AEC2] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
+            }`}
+          >
+            {bedtimeEnabled ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+          </button>
+
+          {user ? (
+            <button
+              type="button"
+              onClick={onOpenParents}
+              className="min-h-[38px] px-3 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors active:scale-95 whitespace-nowrap max-w-[110px] truncate cursor-pointer"
+            >
+              {firstName}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onSignIn}
+              disabled={authLoading}
+              className="inline-flex items-center gap-1.5 min-h-[38px] px-3.5 rounded-xl bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors active:scale-95 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+            >
+              {authLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {authLoading ? 'Signing In...' : 'Sign In'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Editorial Desktop Top Navigation Bar (>= 1280px) */}
+      <div className="hidden xl:flex max-w-7xl mx-auto px-8 h-16 items-center justify-between gap-8">
         <button
           type="button"
           onClick={() => onNavigate('library')}
@@ -42,8 +92,7 @@ export function TopBar({
           Meadowtale
         </button>
 
-        {/* Zone 2: 4 concise single-line navigation links */}
-        <nav aria-label="Primary navigation" className="flex items-center gap-5 sm:gap-7 overflow-x-auto">
+        <nav aria-label="Primary navigation" className="flex items-center gap-7">
           <button
             type="button"
             onClick={() => onNavigate('library')}
@@ -74,7 +123,6 @@ export function TopBar({
           </button>
         </nav>
 
-        {/* Zone 3: Single primary action */}
         <div className="shrink-0">
           {user ? (
             <button
