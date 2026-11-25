@@ -8,6 +8,21 @@
 
 export type ImageProgressCallback = (percent: number) => void;
 
+/** Normalized [ymin, xmin, ymax, xmax] bounding box in 0..1000 coordinates. */
+export type ArtCropBox = [number, number, number, number];
+
+/** Lightweight resolution & JPEG quality tuned for fast, reliable free-tier OCR scanning (~55% smaller). */
+export const SCAN_API_MAX_DIM = 768;
+export const SCAN_API_QUALITY = 0.6;
+
+/** Compact thumbnail sent as style reference for optional on-demand AI illustration. */
+export const REDRAW_REF_MAX_DIM = 512;
+export const REDRAW_REF_QUALITY = 0.55;
+
+/** Crisp local display resolution kept in browser memory for framing & watercolor retouch. */
+export const LOCAL_DISPLAY_MAX_DIM = 1120;
+export const LOCAL_DISPLAY_QUALITY = 0.84;
+
 /**
  * Yields control back to the browser so React state updates (progress bars, spinners)
  * actually paint before the next canvas step executes.
@@ -214,8 +229,8 @@ export async function fileToCompressedDataUrl(
  */
 export async function compressDataUrlForApi(
   sourceDataUrl: string,
-  maxDimension = 1080,
-  quality = 0.74
+  maxDimension = SCAN_API_MAX_DIM,
+  quality = SCAN_API_QUALITY
 ): Promise<{ dataUrl: string; mimeType: string }> {
   try {
     const img = await loadImageElement(
@@ -486,6 +501,102 @@ export async function renderFramedPageImage(
   const dataUrl = await canvasToDataUrlAsync(canvas, 'image/jpeg', 0.9);
   onProgress?.(100);
   return dataUrl;
+}
+
+/**
+ * Validates and normalizes an AI-detected illustration bounding box [ymin, xmin, ymax, xmax] (0..1000).
+ * Returns null if the box is malformed, too tiny, or already covers almost the entire photo.
+ */
+export function sanitizeArtCropBox(raw: unknown): ArtCropBox | null {
+  if (!Array.isArray(raw) || raw.length !== 4) return null;
+  const nums = raw.map((v) => Number(v));
+  if (nums.some((n) => !Number.isFinite(n))) return null;
+
+  const [yMinRaw, xMinRaw, yMaxRaw, xMaxRaw] = nums;
+  const ymin = Math.max(0, Math.min(980, yMinRaw));
+  const xmin = Math.max(0, Math.min(980, xMinRaw));
+  const ymax = Math.max(ymin + 20, Math.min(1000, yMaxRaw));
+  const xmax = Math.max(xmin + 20, Math.min(1000, xMaxRaw));
+
+  const boxW = xmax - xmin;
+  const boxH = ymax - ymin;
+  const areaFraction = (boxW * boxH) / 1_000_000;
+
+  // Ignore boxes that are too tiny (< 12% of photo) or already full-frame (> 90% of photo)
+  if (boxW < 220 || boxH < 200 || areaFraction < 0.12 || areaFraction > 0.9) {
+    return null;
+  }
+
+  return [Math.round(ymin), Math.round(xmin), Math.round(ymax), Math.round(xmax)];
+}
+
+/**
+ * Smartly crops the detected illustration region from a photographed book page (removing
+ * printed text margins) onto a crisp 4:3 (1080x810) canvas with optional watercolor finish.
+ */
+export async function renderSmartFramedArt(
+  sourceDataUrl: string,
+  cropBox: ArtCropBox,
+  applyWatercolor = true
+): Promise<string> {
+  const img = await loadImageElement(sourceDataUrl, 'Failed to load image for smart framing.');
+  await yieldToBrowser();
+
+  const [ymin, xmin, ymax, xmax] = cropBox;
+  // Add a gentle 2.5% safety margin so characters and brush borders aren't clipped
+  const padY = Math.round((ymax - ymin) * 0.025);
+  const padX = Math.round((xmax - xmin) * 0.025);
+  const sy = Math.max(0, Math.round(((ymin - padY) / 1000) * img.height));
+  const sx = Math.max(0, Math.round(((xmin - padX) / 1000) * img.width));
+  const sy2 = Math.min(img.height, Math.round(((ymax + padY) / 1000) * img.height));
+  const sx2 = Math.min(img.width, Math.round(((xmax + padX) / 1000) * img.width));
+
+  const sw = Math.max(16, sx2 - sx);
+  const sh = Math.max(16, sy2 - sy);
+
+  const outWidth = 1080;
+  const outHeight = 810;
+  const canvas = document.createElement('canvas');
+  canvas.width = outWidth;
+  canvas.height = outHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return sourceDataUrl;
+
+  ctx.fillStyle = '#FAF6EE';
+  ctx.fillRect(0, 0, outWidth, outHeight);
+
+  // Fill 4:3 cleanly unless aspect ratio is very wide/tall, in which case contain gently on cotton paper
+  const srcAspect = sw / sh;
+  const targetAspect = outWidth / outHeight;
+  const aspectMismatch = Math.max(srcAspect / targetAspect, targetAspect / srcAspect);
+  const scale =
+    aspectMismatch > 1.55
+      ? Math.min(outWidth / sw, outHeight / sh) * 0.96
+      : Math.max(outWidth / sw, outHeight / sh);
+
+  const dw = sw * scale;
+  const dh = sh * scale;
+  const dx = (outWidth - dw) / 2;
+  const dy = (outHeight - dh) / 2;
+
+  if (applyWatercolor) {
+    const brightnessBoost = estimatePhotoBrightnessBoost(img);
+    ctx.filter = `brightness(${brightnessBoost}) contrast(1.06) saturate(1.22) blur(0.6px)`;
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+
+    ctx.save();
+    ctx.globalAlpha = 0.52;
+    ctx.filter = `contrast(1.14) brightness(${Math.min(1.12, brightnessBoost)}) saturate(1.08)`;
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.restore();
+
+    applyCottonPaperFinish(ctx, outWidth, outHeight, { glazeOpacity: 0.16, borderOpacity: 0.72 });
+  } else {
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+  }
+
+  await yieldToBrowser();
+  return await canvasToDataUrlAsync(canvas, 'image/jpeg', 0.88);
 }
 
 

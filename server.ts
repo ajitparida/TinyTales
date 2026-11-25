@@ -62,6 +62,7 @@ function sanitizeIllustrationSvg(rawSvg: string): string | null {
     .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
     .replace(/<object[\s\S]*?<\/object>/gi, '')
     .replace(/<embed[\s\S]*?>/gi, '')
+    .replace(/<feImage[\s\S]*?(?:\/>|<\/feImage>)/gi, '')
     .replace(/<image[\s\S]*?(?:\/>|<\/image>)/gi, '')
     .replace(/<text[\s\S]*?<\/text>/gi, '')
     .replace(/<tspan[\s\S]*?<\/tspan>/gi, '')
@@ -87,6 +88,51 @@ function sanitizeIllustrationSvg(rawSvg: string): string | null {
   });
 
   return svg.length >= 120 ? svg : null;
+}
+
+function getGeminiErrorStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown })?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function isGeminiQuotaError(err: unknown): boolean {
+  const status = getGeminiErrorStatus(err);
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return (
+    status === 429 ||
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.toLowerCase().includes('quota')
+  );
+}
+
+function parseRetryAfterSeconds(err: unknown, fallbackSeconds = 30): number {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const retryMatch = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/i);
+  if (retryMatch) return Math.max(5, Number(retryMatch[1]));
+  const inMatch = msg.match(/retry in\s+(\d+(?:\.\d+)?)s/i);
+  if (inMatch) return Math.max(5, Math.ceil(Number(inMatch[1])));
+  return fallbackSeconds;
+}
+
+/**
+ * Retries a Gemini call once on transient 5xx / network hiccups while failing fast
+ * on 429 quota limits or 400 validation errors so free-tier RPM is never wasted.
+ */
+async function callGeminiWithSingleRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const status = getGeminiErrorStatus(err);
+    const isTransient =
+      !isGeminiQuotaError(err) &&
+      (status === 500 || status === 502 || status === 503 || status === 504 || status === undefined);
+    if (!isTransient) {
+      throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    return await fn();
+  }
 }
 
 async function startServer() {
@@ -185,102 +231,130 @@ async function startServer() {
 
       contentParts.push({
         text: [
-          'You are a careful children\'s picture book digitizer converting photographed physical storybook pages or mobile screenshots into an interactive multi-page digital storybook.',
+          'You are a fast, accurate children\'s picture book digitizer converting photographed storybook pages or mobile screenshots into a structured digital storybook.',
           pageSplitGuidance,
           textExtractionGuidance,
           titleHint ? `Parent title suggestion: "${String(titleHint).slice(0, 100)}".` : '',
-          'For EACH returned page (including every split page), write a UNIQUE, vivid, specific visual sceneSummary describing the exact story moment on THAT page (characters, actions, expressions, clothing, props, setting, colors, lighting) so a dedicated matching watercolor illustration can be painted specifically for that page.',
-          'For each page, also identify 2 playful interactive character or object tap hotspots located visibly inside the scene (x and y as percentages between 20 and 80), with a friendly character name, short playful spoken line (under 10 words), and reaction style (bounce, wiggle, or sparkle).',
-          `At the end of the story, craft a clear, heartwarming positive moral tailored for ages ${targetAge} (e.g., Kindness, Sharing, Courage, Patience, Honesty) with a concise moral title, a 1-2 sentence child-friendly lesson, and a short parent-child talk-together question.`,
+          'For EACH returned page, write a concise, vivid sceneSummary (1-2 sentences: main characters, action, setting, mood) and choose the closest matching suggestedBackdrop from: meadow, cottage, forest, pond, brook, bridge, twilight, starlight.',
+          'Set hasIllustration to true if its source photo actually contains a storybook picture/artwork, or false if the source photo is mostly plain text/screenshot without an illustration.',
+          'If hasIllustration is true AND the source photo has a distinct artwork region separated from large printed text blocks or phone borders, provide artCropBox as [ymin, xmin, ymax, xmax] integers in 0..1000 coordinates tightly framing the artwork (otherwise return an empty array []).',
+          'For each page, include 2 playful character/object tap hotspots (x and y percentages between 20 and 80, short dialogue under 10 words, reaction: bounce, wiggle, or sparkle).',
+          `At the end, craft a warm positive moral for ages ${targetAge} (moralTitle, moralLesson, parentDiscussionPrompt).`,
         ]
           .filter(Boolean)
           .join('\n'),
       });
 
       const ai = getGeminiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: { parts: contentParts },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: {
-                type: Type.STRING,
-                description: 'Storybook title (max 80 characters)',
-              },
-              subtitle: {
-                type: Type.STRING,
-                description: 'Short cozy one-sentence summary (max 140 characters)',
-              },
-              moralTitle: {
-                type: Type.STRING,
-                description: 'Short value name like Kindness, Courage, or Sharing (max 40 characters)',
-              },
-              moralLesson: {
-                type: Type.STRING,
-                description: 'Warm 1-2 sentence moral lesson for a young child (max 280 characters)',
-              },
-              parentDiscussionPrompt: {
-                type: Type.STRING,
-                description: 'Gentle question a parent can ask their child after reading (max 180 characters)',
-              },
-              suggestedBackdrop: {
-                type: Type.STRING,
-                description: 'One of: pond, forest, twilight, bridge',
-              },
-              pages: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    sourcePhotoIndex: {
-                      type: Type.INTEGER,
-                      description: '0-based index of the uploaded photo this page came from',
-                    },
-                    text: {
-                      type: Type.STRING,
-                      description:
-                        'Readable story text for this page (preserving every printed word across split pages in verbatim mode)',
-                    },
-                    sceneSummary: {
-                      type: Type.STRING,
-                      description:
-                        'Unique, vivid visual description of the characters, actions, colors, and setting specifically for this page',
-                    },
-                    hotspots: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          name: { type: Type.STRING },
-                          x: { type: Type.NUMBER },
-                          y: { type: Type.NUMBER },
-                          dialogue: { type: Type.STRING },
-                          reaction: { type: Type.STRING },
+      const response = await callGeminiWithSingleRetry(() =>
+        ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: { parts: contentParts },
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: {
+                  type: Type.STRING,
+                  description: 'Storybook title (max 80 characters)',
+                },
+                subtitle: {
+                  type: Type.STRING,
+                  description: 'Short cozy one-sentence summary (max 140 characters)',
+                },
+                moralTitle: {
+                  type: Type.STRING,
+                  description: 'Short value name like Kindness, Courage, or Sharing (max 40 characters)',
+                },
+                moralLesson: {
+                  type: Type.STRING,
+                  description: 'Warm 1-2 sentence moral lesson for a young child (max 280 characters)',
+                },
+                parentDiscussionPrompt: {
+                  type: Type.STRING,
+                  description: 'Gentle question a parent can ask their child after reading (max 180 characters)',
+                },
+                suggestedBackdrop: {
+                  type: Type.STRING,
+                  description:
+                    'One of: meadow, cottage, forest, pond, brook, bridge, twilight, starlight',
+                },
+                pages: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      sourcePhotoIndex: {
+                        type: Type.INTEGER,
+                        description: '0-based index of the uploaded photo this page came from',
+                      },
+                      text: {
+                        type: Type.STRING,
+                        description:
+                          'Readable story text for this page (preserving every printed word across split pages in verbatim mode)',
+                      },
+                      sceneSummary: {
+                        type: Type.STRING,
+                        description:
+                          'Concise vivid visual description of the characters, action, and setting for this page',
+                      },
+                      suggestedBackdrop: {
+                        type: Type.STRING,
+                        description:
+                          'Best matching watercolor backdrop for this page: meadow, cottage, forest, pond, brook, bridge, twilight, or starlight',
+                      },
+                      hasIllustration: {
+                        type: Type.BOOLEAN,
+                        description:
+                          'True if the source photo contains real storybook artwork; false if it is plain text or a text-only screenshot',
+                      },
+                      artCropBox: {
+                        type: Type.ARRAY,
+                        items: { type: Type.INTEGER },
+                        description:
+                          'Optional [ymin, xmin, ymax, xmax] in 0..1000 coordinates tightly framing the illustration when separated from text margins, or []',
+                      },
+                      hotspots: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            name: { type: Type.STRING },
+                            x: { type: Type.NUMBER },
+                            y: { type: Type.NUMBER },
+                            dialogue: { type: Type.STRING },
+                            reaction: { type: Type.STRING },
+                          },
+                          required: ['name', 'x', 'y', 'dialogue', 'reaction'],
                         },
-                        required: ['name', 'x', 'y', 'dialogue', 'reaction'],
                       },
                     },
+                    required: [
+                      'sourcePhotoIndex',
+                      'text',
+                      'sceneSummary',
+                      'suggestedBackdrop',
+                      'hasIllustration',
+                      'hotspots',
+                    ],
                   },
-                  required: ['sourcePhotoIndex', 'text', 'sceneSummary', 'hotspots'],
                 },
               },
+              required: [
+                'title',
+                'subtitle',
+                'moralTitle',
+                'moralLesson',
+                'parentDiscussionPrompt',
+                'suggestedBackdrop',
+                'pages',
+              ],
             },
-            required: [
-              'title',
-              'subtitle',
-              'moralTitle',
-              'moralLesson',
-              'parentDiscussionPrompt',
-              'suggestedBackdrop',
-              'pages',
-            ],
           },
-        },
-      });
+        })
+      );
 
       const rawText = (response.text ?? '').trim();
       if (!rawText) {
@@ -310,6 +384,16 @@ async function startServer() {
       }
       res.json(parsed);
     } catch (err: unknown) {
+      if (isGeminiQuotaError(err)) {
+        const retryAfterSeconds = parseRetryAfterSeconds(err, 30);
+        console.warn('Gemini scan quota/rate limit reached (429 RESOURCE_EXHAUSTED).');
+        res.status(429).json({
+          code: 'QUOTA_EXCEEDED',
+          retryAfterSeconds,
+          error: `Free-tier AI scan rate limit reached. Please wait about ${retryAfterSeconds}s and try again, or continue manually with your photos.`,
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Storybook conversion failed.';
       console.error('Error in /api/stories/scan:', message);
       res.status(500).json({ error: message });
@@ -379,30 +463,50 @@ async function startServer() {
 
       parts.push({
         text: [
-          'You are a warm children\'s picture-book illustrator.',
+          'You are an award-winning children\'s picture-book illustrator in the tradition of Beatrix Potter and classic cold-press watercolor storybooks.',
           hasReferencePhoto
-            ? 'Use the uploaded photo above as visual character/world inspiration, and PAINT a fresh, clean, full-bleed SVG picture-book illustration specifically depicting the story moment below with viewBox="0 0 800 600".'
-            : 'Paint a fresh, warm, charming, full-bleed SVG picture-book illustration specifically depicting the story moment below with viewBox="0 0 800 600".',
+            ? 'Use the uploaded photo above only for character colors/world inspiration, and PAINT a lush, charming, full-bleed SVG picture-book spread depicting the story moment below with viewBox="0 0 800 600".'
+            : 'Paint a lush, charming, full-bleed SVG picture-book spread depicting the story moment below with viewBox="0 0 800 600".',
           pagePosNote,
           safeScene ? `Scene visual brief: ${safeScene}` : '',
           safePageText ? `Story text for this page: ${safePageText}` : '',
           `Art palette: ${stylePalette}`,
-          'STRICT RULES:',
-          '1. Output ONLY the raw <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600">...</svg> markup with no markdown fences and no extra explanation.',
-          '2. NEVER include <text>, <tspan>, letters, words, speech bubbles, page numbers, phone UI, book creases, hands, or borders.',
-          '3. Keep the SVG concise and expressive (22 to 38 clean layered shapes total, using simple rounded integer coordinates): include 2-3 <defs> gradients (warm sky/backdrop + ground), rolling hills/trees/clouds or cozy room interior, lovingly detailed main characters acting out THIS page\'s moment (expressive eyes, rosy cheeks, clear silhouette, grounded shadow, soft #4A3B31 strokes), and charming foreground details (flowers, leaves, stars, or cozy props).',
+          'ARTISTIC COMPOSITION & SVG RULES:',
+          '1. Output ONLY raw <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="800" height="600">...</svg> markup with no markdown fences and no extra commentary.',
+          '2. NEVER include <text>, <tspan>, letters, words, speech bubbles, page numbers, UI chrome, or picture frames.',
+          '3. Create rich storybook depth using 42 to 68 organic, hand-crafted SVG elements (cubic bezier <path> curves and soft ellipses, avoiding stiff boxy rectangles):',
+          '   - <defs> with 4-6 harmonious <linearGradient> / <radialGradient> definitions (sunlit sky, glowing sun/moon halo, layered hills/meadow or cozy room lighting, water/path reflections) plus a gentle watercolor wash filter <filter id="softWash"><feGaussianBlur stdDeviation="6"/></filter> for soft atmospheric clouds, light shafts, and pigment blooms.',
+          '   - Distinct background, midground, and foreground layers (distant hills/trees or cozy cottage walls, winding path/pond/furniture, foreground botanical leaves, wildflowers, grass tufts, or twinkling fireflies).',
+          '   - Lovingly illustrated main character(s) acting out THIS exact page moment with warm organic proportions, gentle shadows underneath, layered fur/clothing shapes, expressive sparkling eyes, rosy cheeks, and soft warm sepia ink contours (#4A3B31, stroke-linecap="round", stroke-opacity="0.7").',
         ]
           .filter(Boolean)
           .join('\n'),
       });
 
       const ai = getGeminiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: { parts },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-        },
+      const response = await callGeminiWithSingleRetry(async () => {
+        try {
+          return await ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: { parts },
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            },
+          });
+        } catch (primaryErr) {
+          const status = getGeminiErrorStatus(primaryErr);
+          // Only fall back to flash-lite if the model endpoint itself is unavailable (404), never on 429 quota
+          if (status === 404) {
+            return await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents: { parts },
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+              },
+            });
+          }
+          throw primaryErr;
+        }
       });
 
       const rawText = (response.text ?? '').trim();
@@ -428,9 +532,19 @@ async function startServer() {
 
       res.json({
         svg: sanitizedSvg,
-        styleNote: `Illustrated in ${styleLabel} picture-book style.`,
+        styleNote: `Illustrated in ${styleLabel} storybook style.`,
       });
     } catch (err: unknown) {
+      if (isGeminiQuotaError(err)) {
+        const retryAfterSeconds = parseRetryAfterSeconds(err, 30);
+        console.warn('Gemini redraw quota/rate limit reached (429 RESOURCE_EXHAUSTED).');
+        res.status(429).json({
+          code: 'QUOTA_EXCEEDED',
+          retryAfterSeconds,
+          error: `Free-tier AI illustration limit reached. Wait ~${retryAfterSeconds}s to retry, or switch this page to a built-in Painterly Scene or Watercolor Photo instantaneously.`,
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Illustration generation failed.';
       console.error('Error in /api/stories/redraw:', message);
       res.status(500).json({ error: message });

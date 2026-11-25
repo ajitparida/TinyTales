@@ -4,7 +4,15 @@ export type CharacterReaction = 'bounce' | 'wiggle' | 'sparkle';
 
 export type AvatarId = 'duck' | 'bear' | 'firefly' | 'fox';
 
-export type BackdropId = 'pond' | 'forest' | 'twilight' | 'bridge';
+export type BackdropId =
+  | 'pond'
+  | 'forest'
+  | 'twilight'
+  | 'bridge'
+  | 'meadow'
+  | 'cottage'
+  | 'starlight'
+  | 'brook';
 
 export interface CharacterHotspot {
   id: string;
@@ -22,7 +30,7 @@ export interface StoryPage {
   sceneSummary: string;
   imageUrl?: string; // Static asset path for curated stories
   mediaId?: string; // IndexedDB media key for parent-scanned stories
-  visualMode?: 'photo' | 'watercolor' | 'redraw';
+  visualMode?: 'photo' | 'watercolor' | 'scene' | 'redraw';
   fallbackArtId?: BackdropId;
   hotspots: CharacterHotspot[];
 }

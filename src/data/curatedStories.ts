@@ -9,14 +9,48 @@ export const WATERCOLOR_ASSETS = {
   lumaGlow: '/src/assets/images/story_luma_firefly_glow_1795279981028.jpg',
   barnabyCover: '/src/assets/images/story_barnaby_fox_cover_1795279963006.jpg',
   barnabyBridge: '/src/assets/images/story_barnaby_fox_bridge_1795279962362.jpg',
+  sunnyMeadow: '/src/assets/images/scene_sunny_meadow_1795614560806.jpg',
+  cozyCottage: '/src/assets/images/scene_cozy_cottage_1795614561640.jpg',
+  starryNight: '/src/assets/images/scene_starry_night_1795614563645.jpg',
+  gentleBrook: '/src/assets/images/scene_gentle_brook_1795614563887.jpg',
 } as const;
 
 export const BACKDROP_ART_MAP: Record<BackdropId, string> = {
-  pond: WATERCOLOR_ASSETS.pipCover,
+  meadow: WATERCOLOR_ASSETS.sunnyMeadow,
+  cottage: WATERCOLOR_ASSETS.cozyCottage,
   forest: WATERCOLOR_ASSETS.miloCover,
-  twilight: WATERCOLOR_ASSETS.lumaCover,
+  pond: WATERCOLOR_ASSETS.pipCover,
+  brook: WATERCOLOR_ASSETS.gentleBrook,
   bridge: WATERCOLOR_ASSETS.barnabyCover,
+  twilight: WATERCOLOR_ASSETS.lumaCover,
+  starlight: WATERCOLOR_ASSETS.starryNight,
 };
+
+export const BACKDROP_SCENE_CATALOG: ReadonlyArray<{
+  id: BackdropId;
+  label: string;
+  mood: string;
+}> = [
+  { id: 'meadow', label: 'Sunny Meadow', mood: 'Wildflowers, daisies & warm sunshine' },
+  { id: 'cottage', label: 'Cozy Cottage', mood: 'Indoors, home, quilt & fireside warmth' },
+  { id: 'forest', label: 'Meadow Forest', mood: 'Woodland trees, picnics & friendly bears' },
+  { id: 'pond', label: 'Sunny Pond', mood: 'Rippling water, lily pads & playful splashes' },
+  { id: 'brook', label: 'Gentle Brook', mood: 'Stepping stones, willows & woodland stream' },
+  { id: 'bridge', label: 'Mossy Bridge', mood: 'Journeys, paths & curious adventures' },
+  { id: 'twilight', label: 'Starlit Twilight', mood: 'Dusk fireflies, soft lantern glow' },
+  { id: 'starlight', label: 'Starry Night', mood: 'Crescent moon, bedtime hills & dreams' },
+];
+
+export const ALL_BACKDROP_IDS: ReadonlySet<string> = new Set(
+  BACKDROP_SCENE_CATALOG.map((item) => item.id)
+);
+
+export function normalizeBackdropId(value: unknown, fallback: BackdropId = 'meadow'): BackdropId {
+  if (typeof value === 'string' && ALL_BACKDROP_IDS.has(value)) {
+    return value as BackdropId;
+  }
+  return fallback;
+}
 
 export const CURATED_STORIES: Story[] = [
   {

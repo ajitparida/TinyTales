@@ -9,6 +9,7 @@ import {
   Check,
   Crop,
   FilePlus2,
+  Focus,
   Globe,
   Image as ImageIcon,
   ImagePlus,
@@ -16,10 +17,12 @@ import {
   Layers,
   Loader2,
   Paintbrush,
+  Palette,
   PenLine,
   RefreshCw,
   Scissors,
   Sparkles,
+  Square,
   Star,
   Trash2,
   Upload,
@@ -27,32 +30,48 @@ import {
   X,
 } from 'lucide-react';
 import { AgeGroup, BackdropId, CharacterHotspot, Story, StoryPage } from '../types/story';
-import { BACKDROP_ART_MAP } from '../data/curatedStories';
 import {
+  BACKDROP_ART_MAP,
+  BACKDROP_SCENE_CATALOG,
+  normalizeBackdropId,
+} from '../data/curatedStories';
+import {
+  ArtCropBox,
   compressDataUrlForApi,
   fileToCompressedDataUrl,
+  LOCAL_DISPLAY_MAX_DIM,
+  LOCAL_DISPLAY_QUALITY,
+  REDRAW_REF_MAX_DIM,
+  REDRAW_REF_QUALITY,
   renderRedrawnSvgToWatercolorCanvas,
+  renderSmartFramedArt,
   renderWatercolorStorybookStyle,
+  sanitizeArtCropBox,
+  SCAN_API_MAX_DIM,
+  SCAN_API_QUALITY,
   yieldToBrowser,
 } from '../lib/watercolorFilter';
 import { resolveStoryMediaUrl, saveStoryMedia } from '../lib/mediaStore';
 import { sanitizeId } from '../lib/firebase';
 import { PageImageFramingModal } from './PageImageFramingModal';
 
-type VisualMode = 'photo' | 'watercolor' | 'redraw';
+type VisualMode = 'photo' | 'watercolor' | 'scene' | 'redraw';
+type CaptureVisualMode = 'watercolor' | 'scene' | 'photo';
 type TextMode = 'verbatim' | 'simplified';
 type RedrawStyle = 'watercolor' | 'pastel' | 'gouache';
 type CreateMode = 'scan' | 'manual';
 
 const MAX_STORY_PAGES = 10;
 const MAX_UPLOAD_BATCH = 6;
+const SCAN_TIMEOUT_MS = 45_000;
+const REDRAW_TIMEOUT_MS = 40_000;
 
 interface CapturedPageDraft {
   id: string;
   originalDataUrl: string;
   watercolorDataUrl: string | null;
   mimeType: string;
-  visualMode: VisualMode;
+  visualMode: CaptureVisualMode;
 }
 
 interface ReviewedPageDraft {
@@ -60,6 +79,7 @@ interface ReviewedPageDraft {
   text: string;
   sceneSummary: string;
   visualMode: VisualMode;
+  sceneBackdropId: BackdropId;
   artStyle: RedrawStyle;
   existingMediaId?: string;
   mediaDirty?: boolean;
@@ -68,9 +88,14 @@ interface ReviewedPageDraft {
   watercolorDataUrl: string | null;
   redrawnDataUrl: string | null;
   framedOverrideUrl?: string | null;
+  hasIllustration?: boolean;
+  artCropBox?: ArtCropBox | null;
+  smartFramedUrl?: string | null;
+  isSmartFramed?: boolean;
   redrawNote?: string;
   isRedrawing?: boolean;
   redrawError?: string | null;
+  redrawIsQuota?: boolean;
   hotspots: CharacterHotspot[];
 }
 
@@ -91,12 +116,22 @@ const REDRAW_STYLES: { id: RedrawStyle; label: string }[] = [
   { id: 'gouache', label: 'Woodland Gouache' },
 ];
 
-const BACKDROP_CHOICES: { id: BackdropId; label: string }[] = [
-  { id: 'forest', label: 'Meadow Forest' },
-  { id: 'pond', label: 'Sunny Pond' },
-  { id: 'twilight', label: 'Starlit Twilight' },
-  { id: 'bridge', label: 'Mossy Bridge' },
-];
+class ApiRequestError extends Error {
+  status?: number;
+  code?: string;
+  retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    opts?: { status?: number; code?: string; retryAfterSeconds?: number }
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = opts?.status;
+    this.code = opts?.code;
+    this.retryAfterSeconds = opts?.retryAfterSeconds;
+  }
+}
 
 interface UploadProgressState {
   percent: number;
@@ -146,7 +181,8 @@ function ImageProgressBar({
 function createStarterPageDraft(
   index: number,
   defaultStyle: RedrawStyle,
-  text = ''
+  text = '',
+  defaultScene: BackdropId = 'meadow'
 ): ReviewedPageDraft {
   const newId = sanitizeId(`page_manual_${Date.now()}_${index + 1}_${Math.random().toString(36).slice(2, 5)}`);
   return {
@@ -155,7 +191,8 @@ function createStarterPageDraft(
     sceneSummary: text
       ? `Warm children's storybook scene illustrating: ${text.slice(0, 180)}`
       : `Page ${index + 1} storybook illustration`,
-    visualMode: 'photo',
+    visualMode: 'scene',
+    sceneBackdropId: defaultScene,
     artStyle: defaultStyle,
     mediaDirty: true,
     originalDataUrl: null,
@@ -163,6 +200,10 @@ function createStarterPageDraft(
     watercolorDataUrl: null,
     redrawnDataUrl: null,
     framedOverrideUrl: null,
+    hasIllustration: false,
+    artCropBox: null,
+    smartFramedUrl: null,
+    isSmartFramed: false,
     hotspots: [
       {
         id: `hs_${newId}_1`,
@@ -330,36 +371,84 @@ function splitStoryTextCleanly(rawText: string): [string, string] {
 
 function getPageDisplayImage(page: ReviewedPageDraft, fallbackBackdrop: BackdropId): string {
   if (page.framedOverrideUrl) return page.framedOverrideUrl;
+  if (page.visualMode === 'scene') {
+    return BACKDROP_ART_MAP[page.sceneBackdropId || fallbackBackdrop] || BACKDROP_ART_MAP.meadow;
+  }
   if (page.visualMode === 'redraw' && page.redrawnDataUrl) return page.redrawnDataUrl;
+  if (page.isSmartFramed && page.smartFramedUrl) return page.smartFramedUrl;
   if (page.visualMode === 'watercolor' && page.watercolorDataUrl) return page.watercolorDataUrl;
   if (page.originalDataUrl) return page.originalDataUrl;
   if (page.redrawnDataUrl) return page.redrawnDataUrl;
   if (page.watercolorDataUrl) return page.watercolorDataUrl;
-  return BACKDROP_ART_MAP[fallbackBackdrop] || BACKDROP_ART_MAP.forest;
+  return BACKDROP_ART_MAP[page.sceneBackdropId || fallbackBackdrop] || BACKDROP_ART_MAP.meadow;
 }
 
 /**
- * Safely posts JSON to an API route, handling non-JSON HTML proxy responses
- * (such as 413 Payload Too Large, 502/504 gateway pages, or transient preview restarts)
- * with an automatic single retry and clear, human-readable errors.
+ * Safely posts JSON to an API route with timeout + AbortSignal support, handling
+ * non-JSON HTML proxy responses and 429 free-tier quota responses cleanly.
  */
 async function postApiJson<T extends Record<string, unknown>>(
   url: string,
   payload: unknown,
-  fallbackError: string
+  fallbackError: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
 ): Promise<T> {
   const maxAttempts = 2;
+  const timeoutMs = options?.timeoutMs ?? SCAN_TIMEOUT_MS;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      credentials: 'same-origin',
-      body: JSON.stringify(payload),
-    });
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    const onExternalAbort = () => controller.abort();
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        window.clearTimeout(timeoutId);
+        throw new ApiRequestError('Scan cancelled.', { code: 'ABORTED' });
+      }
+      options.signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        credentials: 'same-origin',
+        signal: controller.signal,
+        body: JSON.stringify(payload),
+      });
+    } catch (fetchErr) {
+      window.clearTimeout(timeoutId);
+      options?.signal?.removeEventListener('abort', onExternalAbort);
+      if (options?.signal?.aborted) {
+        throw new ApiRequestError('Scan cancelled.', { code: 'ABORTED' });
+      }
+      if (timedOut) {
+        throw new ApiRequestError(
+          'The request timed out on the free tier. Try scanning 1–3 photos at a time or continue manually with your photos.',
+          { status: 504, code: 'TIMEOUT' }
+        );
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((r) => window.setTimeout(r, 850));
+        continue;
+      }
+      throw new ApiRequestError(
+        fetchErr instanceof Error ? fetchErr.message : fallbackError,
+        { code: 'NETWORK' }
+      );
+    } finally {
+      window.clearTimeout(timeoutId);
+      options?.signal?.removeEventListener('abort', onExternalAbort);
+    }
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
     const rawText = await response.text();
@@ -371,21 +460,24 @@ async function postApiJson<T extends Record<string, unknown>>(
 
     if (looksLikeHtml) {
       if (attempt < maxAttempts && (response.status >= 500 || response.status === 200)) {
-        await new Promise((r) => window.setTimeout(r, 1100));
+        await new Promise((r) => window.setTimeout(r, 1000));
         continue;
       }
       if (response.status === 413) {
-        throw new Error(
-          'Your photos were too large to scan all at once. Try scanning 1–3 photos at a time.'
+        throw new ApiRequestError(
+          'Your photos were too large to scan all at once. Try scanning 1–3 photos at a time.',
+          { status: 413 }
         );
       }
       if (response.status === 504 || response.status === 502 || response.status === 503) {
-        throw new Error(
-          'The storybook scan took too long or the server was briefly busy. Please try again with 1–3 photos.'
+        throw new ApiRequestError(
+          'The storybook scan took too long or the server was briefly busy. Please try again with 1–3 photos.',
+          { status: response.status }
         );
       }
-      throw new Error(
-        'The server returned a webpage instead of scan results (your preview session may have refreshed). Please reload the page and try scanning again.'
+      throw new ApiRequestError(
+        'The server returned a webpage instead of scan results (your preview session may have refreshed). Please reload the page and try scanning again.',
+        { status: response.status }
       );
     }
 
@@ -394,32 +486,43 @@ async function postApiJson<T extends Record<string, unknown>>(
       parsed = (trimmed ? JSON.parse(trimmed) : {}) as T;
     } catch {
       if (attempt < maxAttempts && response.status >= 500) {
-        await new Promise((r) => window.setTimeout(r, 900));
+        await new Promise((r) => window.setTimeout(r, 850));
         continue;
       }
-      throw new Error(`${fallbackError} (HTTP ${response.status}). Please try again.`);
+      throw new ApiRequestError(`${fallbackError} (HTTP ${response.status}). Please try again.`, {
+        status: response.status,
+      });
     }
 
     if (!response.ok) {
       const serverMsg =
         typeof parsed.error === 'string' && parsed.error.trim() ? parsed.error : fallbackError;
-      throw new Error(serverMsg);
+      const code = typeof parsed.code === 'string' ? parsed.code : undefined;
+      const retryAfterSeconds =
+        typeof parsed.retryAfterSeconds === 'number' ? parsed.retryAfterSeconds : undefined;
+      throw new ApiRequestError(serverMsg, {
+        status: response.status,
+        code: response.status === 429 ? code || 'QUOTA_EXCEEDED' : code,
+        retryAfterSeconds,
+      });
     }
 
     return parsed;
   }
 
-  throw new Error(fallbackError);
+  throw new ApiRequestError(fallbackError);
 }
 
 async function requestAiRedrawIllustration(params: {
   imageBase64?: string | null;
   mimeType?: string | null;
+  includePhotoRef?: boolean;
   sceneSummary?: string;
   pageText?: string;
   artStyle: RedrawStyle;
   pageNumber?: number;
   totalPages?: number;
+  signal?: AbortSignal;
 }): Promise<{ dataUrl: string; styleNote: string }> {
   const payload: Record<string, unknown> = {
     sceneSummary: params.sceneSummary,
@@ -428,8 +531,18 @@ async function requestAiRedrawIllustration(params: {
     pageNumber: params.pageNumber,
     totalPages: params.totalPages,
   };
-  if (params.imageBase64 && params.mimeType && params.imageBase64.startsWith('data:image/')) {
-    const compactRef = await compressDataUrlForApi(params.imageBase64, 768, 0.68);
+  if (
+    params.includePhotoRef !== false &&
+    params.imageBase64 &&
+    params.mimeType &&
+    params.imageBase64.startsWith('data:image/')
+  ) {
+    // Lightweight 512px reference thumbnail minimizes free-tier token usage & latency
+    const compactRef = await compressDataUrlForApi(
+      params.imageBase64,
+      REDRAW_REF_MAX_DIM,
+      REDRAW_REF_QUALITY
+    );
     payload.imageBase64 = compactRef.dataUrl;
     payload.mimeType = compactRef.mimeType;
   }
@@ -437,10 +550,11 @@ async function requestAiRedrawIllustration(params: {
   const data = await postApiJson<{ svg?: string; styleNote?: string; error?: string }>(
     '/api/stories/redraw',
     payload,
-    'Could not generate storybook illustration.'
+    'Could not generate storybook illustration.',
+    { signal: params.signal, timeoutMs: REDRAW_TIMEOUT_MS }
   );
   if (typeof data.svg !== 'string') {
-    throw new Error(data.error || 'Could not generate storybook illustration.');
+    throw new ApiRequestError(data.error || 'Could not generate storybook illustration.');
   }
   const renderedDataUrl = await renderRedrawnSvgToWatercolorCanvas(data.svg);
   return {
@@ -475,15 +589,19 @@ export function StoryScanner({
   const [textMode, setTextMode] = useState<TextMode>('verbatim');
   const [autoSplitPages, setAutoSplitPages] = useState<boolean>(true);
   const [titleHint, setTitleHint] = useState('');
-  const [defaultVisualMode, setDefaultVisualMode] = useState<VisualMode>('redraw');
+  const [defaultVisualMode, setDefaultVisualMode] = useState<CaptureVisualMode>('watercolor');
   const [defaultRedrawStyle, setDefaultRedrawStyle] = useState<RedrawStyle>('watercolor');
   const [capturedPages, setCapturedPages] = useState<CapturedPageDraft[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [studioBanner, setStudioBanner] = useState<string | null>(null);
   const [conversionStatus, setConversionStatus] = useState(
-    'Reading every printed word and preparing kid-friendly pages...'
+    'Optimizing photos for fast free-tier scanning...'
   );
   const [conversionProgress, setConversionProgress] = useState<number>(0);
+
+  // Abort controllers for responsive scan & batch cancellation
+  const scanAbortRef = useRef<AbortController | null>(null);
+  const batchAbortRef = useRef<AbortController | null>(null);
 
   // Live camera capture modal state
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -499,7 +617,7 @@ export function StoryScanner({
     editingStory?.parentDiscussionPrompt || ''
   );
   const [draftBackdrop, setDraftBackdrop] = useState<BackdropId>(
-    editingStory?.coverFallbackId || 'forest'
+    normalizeBackdropId(editingStory?.coverFallbackId, 'meadow')
   );
   const [coverPageIndex, setCoverPageIndex] = useState<number>(0);
   const [reviewedPages, setReviewedPages] = useState<ReviewedPageDraft[]>(() =>
@@ -538,7 +656,7 @@ export function StoryScanner({
   const [isImportingExtra, setIsImportingExtra] = useState(false);
   const [extraImportStatus, setExtraImportStatus] = useState<string | null>(null);
   const [extraImportProgress, setExtraImportProgress] = useState<number>(0);
-  const [extraAutoIllustrate, setExtraAutoIllustrate] = useState(true);
+  const [extraUseScenes, setExtraUseScenes] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -546,6 +664,13 @@ export function StoryScanner({
   const bulkManualImagesInputRef = useRef<HTMLInputElement | null>(null);
   const replacePhotoInputRef = useRef<HTMLInputElement | null>(null);
   const replaceTargetPageIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      scanAbortRef.current?.abort();
+      batchAbortRef.current?.abort();
+    };
+  }, []);
 
   // Hydrate existing saved book when entering Edit Mode
   useEffect(() => {
@@ -576,18 +701,25 @@ export function StoryScanner({
             matchedCoverIdx = i;
           }
           const savedDataUrl = p.mediaId ? await resolveStoryMediaUrl(p.mediaId) : null;
+          const sceneBackdrop = normalizeBackdropId(
+            p.fallbackArtId || editingStory.coverFallbackId,
+            'meadow'
+          );
           const mode: VisualMode =
-            p.visualMode === 'redraw'
-              ? 'redraw'
-              : p.visualMode === 'watercolor'
-                ? 'watercolor'
-                : 'photo';
+            p.visualMode === 'scene' || (!savedDataUrl && !p.mediaId)
+              ? 'scene'
+              : p.visualMode === 'redraw'
+                ? 'redraw'
+                : p.visualMode === 'watercolor'
+                  ? 'watercolor'
+                  : 'photo';
 
           loaded.push({
             id: p.id || `page_${i + 1}`,
             text: p.text,
             sceneSummary: p.sceneSummary || `Page ${i + 1} illustration`,
             visualMode: mode,
+            sceneBackdropId: sceneBackdrop,
             artStyle: 'watercolor',
             existingMediaId: p.mediaId,
             mediaDirty: false,
@@ -600,6 +732,10 @@ export function StoryScanner({
             watercolorDataUrl: mode === 'watercolor' ? savedDataUrl : null,
             redrawnDataUrl: mode === 'redraw' ? savedDataUrl : null,
             framedOverrideUrl: null,
+            hasIllustration: Boolean(savedDataUrl),
+            artCropBox: null,
+            smartFramedUrl: null,
+            isSmartFramed: false,
             hotspots:
               Array.isArray(p.hotspots) && p.hotspots.length > 0
                 ? p.hotspots
@@ -667,46 +803,31 @@ export function StoryScanner({
     if (!video || capturedPages.length >= MAX_UPLOAD_BATCH || isSnappingPhoto) return;
     setIsSnappingPhoto(true);
     setCaptureUploadProgress({
-      percent: 15,
+      percent: 25,
       label: 'Capturing snapshot from camera...',
     });
     await yieldToBrowser();
 
     try {
       const canvas = document.createElement('canvas');
-      const width = Math.min(video.videoWidth || 1400, 1400);
-      const height = Math.round(((video.videoHeight || 1050) / (video.videoWidth || 1400)) * width);
+      const srcW = video.videoWidth || LOCAL_DISPLAY_MAX_DIM;
+      const srcH = video.videoHeight || Math.round(LOCAL_DISPLAY_MAX_DIM * 0.75);
+      const scale = Math.min(1, LOCAL_DISPLAY_MAX_DIM / Math.max(srcW, srcH));
+      const width = Math.max(1, Math.round(srcW * scale));
+      const height = Math.max(1, Math.round(srcH * scale));
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.drawImage(video, 0, 0, width, height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-      setCaptureUploadProgress({
-        percent: defaultVisualMode === 'watercolor' ? 50 : 90,
-        label:
-          defaultVisualMode === 'watercolor'
-            ? 'Applying watercolor cotton-paper finish...'
-            : 'Preparing captured photo...',
-      });
-      await yieldToBrowser();
-
-      const watercolorUrl =
-        defaultVisualMode === 'watercolor'
-          ? await renderWatercolorStorybookStyle(dataUrl, (pct) => {
-              setCaptureUploadProgress({
-                percent: 50 + Math.round(pct * 0.5),
-                label: 'Applying watercolor cotton-paper finish...',
-              });
-            })
-          : null;
+      const dataUrl = canvas.toDataURL('image/jpeg', LOCAL_DISPLAY_QUALITY);
 
       setCapturedPages((prev) => [
         ...prev,
         {
           id: `snap_${Date.now()}_${prev.length + 1}`,
           originalDataUrl: dataUrl,
-          watercolorDataUrl: watercolorUrl,
+          watercolorDataUrl: null,
           mimeType: 'image/jpeg',
           visualMode: defaultVisualMode,
         },
@@ -730,60 +851,46 @@ export function StoryScanner({
 
     setIsAddingCaptureFiles(true);
     setCaptureUploadProgress({
-      percent: 4,
-      label: `Uploading photo 1 of ${batch.length}...`,
+      percent: 6,
+      label: `Adding photo 1 of ${batch.length}...`,
       detail: batch[0].name,
     });
-    // Let the browser paint the progress bar immediately before decoding image files
     await yieldToBrowser();
 
     try {
-      const needsWatercolor = defaultVisualMode === 'watercolor';
       for (let i = 0; i < batch.length; i++) {
         const file = batch[i];
         const basePct = (i / batch.length) * 100;
         const stepSpan = 100 / batch.length;
         try {
           setCaptureUploadProgress({
-            percent: Math.max(4, Math.round(basePct + stepSpan * 0.08)),
-            label: `Uploading photo ${i + 1} of ${batch.length}...`,
-            detail: `Compressing ${file.name}`,
+            percent: Math.max(6, Math.round(basePct + stepSpan * 0.12)),
+            label: `Adding photo ${i + 1} of ${batch.length}...`,
+            detail: file.name,
           });
 
-          const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
-            const weight = needsWatercolor ? 0.55 : 0.95;
-            setCaptureUploadProgress({
-              percent: Math.min(99, Math.round(basePct + stepSpan * (pct / 100) * weight)),
-              label: `Uploading photo ${i + 1} of ${batch.length}...`,
-              detail: `Compressing ${file.name}`,
-            });
-          });
-
-          let watercolorUrl: string | null = null;
-          if (needsWatercolor) {
-            setCaptureUploadProgress({
-              percent: Math.min(99, Math.round(basePct + stepSpan * 0.58)),
-              label: `Styling photo ${i + 1} of ${batch.length}...`,
-              detail: 'Applying soft watercolor paper finish',
-            });
-            watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
+          // Keep a crisp 1120px local copy; defer watercolor canvas pass until Review so upload stays instant
+          const { dataUrl, mimeType } = await fileToCompressedDataUrl(
+            file,
+            LOCAL_DISPLAY_MAX_DIM,
+            LOCAL_DISPLAY_QUALITY,
+            (pct) => {
               setCaptureUploadProgress({
-                percent: Math.min(99, Math.round(basePct + stepSpan * (0.55 + (pct / 100) * 0.45))),
-                label: `Styling photo ${i + 1} of ${batch.length}...`,
-                detail: 'Applying soft watercolor paper finish',
+                percent: Math.min(99, Math.round(basePct + stepSpan * (pct / 100))),
+                label: `Adding photo ${i + 1} of ${batch.length}...`,
+                detail: file.name,
               });
-            });
-          }
+            }
+          );
 
           const draft: CapturedPageDraft = {
             id: `snap_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
             originalDataUrl: dataUrl,
-            watercolorDataUrl: watercolorUrl,
+            watercolorDataUrl: null,
             mimeType,
             visualMode: defaultVisualMode,
           };
 
-          // Append each photo as soon as it is ready so the page stays live and responsive
           setCapturedPages((prev) => [...prev, draft]);
           await yieldToBrowser();
         } catch (err) {
@@ -802,34 +909,8 @@ export function StoryScanner({
     }
   };
 
-  const toggleCapturedVisualMode = async (id: string, mode: VisualMode) => {
-    const target = capturedPages.find((p) => p.id === id);
-    if (!target) return;
-
-    let watercolorUrl = target.watercolorDataUrl;
-    if (mode === 'watercolor' && !watercolorUrl) {
-      setCaptureUploadProgress({
-        percent: 15,
-        label: 'Applying watercolor retouch...',
-      });
-      await yieldToBrowser();
-      try {
-        watercolorUrl = await renderWatercolorStorybookStyle(target.originalDataUrl, (pct) => {
-          setCaptureUploadProgress({
-            percent: Math.max(15, pct),
-            label: 'Applying watercolor retouch...',
-          });
-        });
-      } finally {
-        setCaptureUploadProgress(null);
-      }
-    }
-
-    setCapturedPages((prev) =>
-      prev.map((p) =>
-        p.id === id ? { ...p, visualMode: mode, watercolorDataUrl: watercolorUrl } : p
-      )
-    );
+  const toggleCapturedVisualMode = (id: string, mode: CaptureVisualMode) => {
+    setCapturedPages((prev) => prev.map((p) => (p.id === id ? { ...p, visualMode: mode } : p)));
   };
 
   const removeCapturedPage = (id: string) => {
@@ -841,14 +922,15 @@ export function StoryScanner({
     styleOverride?: RedrawStyle,
     explicitPage?: ReviewedPageDraft,
     pageIdxHint?: number,
-    totalCountHint?: number
-  ) => {
+    totalCountHint?: number,
+    signal?: AbortSignal
+  ): Promise<'ok' | 'quota' | 'aborted' | 'error'> => {
     const idx =
       typeof pageIdxHint === 'number'
         ? pageIdxHint
         : reviewedPages.findIndex((p) => p.id === pageId);
     const target = explicitPage || reviewedPages[idx];
-    if (!target || target.isRedrawing) return;
+    if (!target || target.isRedrawing) return 'error';
 
     const chosenStyle = styleOverride ?? target.artStyle;
     setReviewedPages((prev) =>
@@ -860,6 +942,7 @@ export function StoryScanner({
               visualMode: 'redraw',
               isRedrawing: true,
               redrawError: null,
+              redrawIsQuota: false,
             }
           : p
       )
@@ -869,11 +952,13 @@ export function StoryScanner({
       const result = await requestAiRedrawIllustration({
         imageBase64: target.originalDataUrl,
         mimeType: target.mimeType,
+        includePhotoRef: target.hasIllustration !== false,
         sceneSummary: target.sceneSummary,
         pageText: target.text,
         artStyle: chosenStyle,
         pageNumber: idx >= 0 ? idx + 1 : 1,
         totalPages: totalCountHint ?? reviewedPages.length,
+        signal,
       });
 
       setReviewedPages((prev) =>
@@ -884,16 +969,27 @@ export function StoryScanner({
                 visualMode: 'redraw',
                 redrawnDataUrl: result.dataUrl,
                 framedOverrideUrl: null,
+                isSmartFramed: false,
                 mediaDirty: true,
                 redrawNote: result.styleNote,
                 isRedrawing: false,
                 redrawError: null,
+                redrawIsQuota: false,
               }
             : p
         )
       );
+      return 'ok';
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not paint this page.';
+      const isAborted = err instanceof ApiRequestError && err.code === 'ABORTED';
+      const isQuota =
+        err instanceof ApiRequestError && (err.status === 429 || err.code === 'QUOTA_EXCEEDED');
+      const msg = isAborted
+        ? null
+        : err instanceof Error
+          ? err.message
+          : 'Could not paint this page.';
+
       setReviewedPages((prev) =>
         prev.map((p) =>
           p.id === pageId
@@ -901,20 +997,32 @@ export function StoryScanner({
                 ...p,
                 isRedrawing: false,
                 redrawError: msg,
+                redrawIsQuota: isQuota,
                 visualMode: p.redrawnDataUrl
                   ? 'redraw'
-                  : p.watercolorDataUrl
-                    ? 'watercolor'
-                    : 'photo',
+                  : p.originalDataUrl && p.hasIllustration !== false
+                    ? p.watercolorDataUrl
+                      ? 'watercolor'
+                      : 'photo'
+                    : 'scene',
               }
             : p
         )
       );
+      if (isAborted) return 'aborted';
+      if (isQuota) return 'quota';
+      return 'error';
     }
+  };
+
+  const handleStopBatchGeneration = () => {
+    batchAbortRef.current?.abort();
   };
 
   const handleGenerateAllIllustrations = async () => {
     if (isBatchGenerating || reviewedPages.length === 0) return;
+    const controller = new AbortController();
+    batchAbortRef.current = controller;
     setIsBatchGenerating(true);
     setBatchProgressPercent(5);
     setErrorMsg(null);
@@ -922,27 +1030,68 @@ export function StoryScanner({
 
     const snapshot = [...reviewedPages];
     let succeeded = 0;
+    let stoppedByQuota = false;
+    let cancelledByUser = false;
 
     try {
       for (let i = 0; i < snapshot.length; i++) {
+        if (controller.signal.aborted) {
+          cancelledByUser = true;
+          break;
+        }
         const page = snapshot[i];
         setBatchProgressPercent(Math.max(5, Math.round((i / snapshot.length) * 100)));
         setBatchProgressText(
-          `Painting matching ${
+          `Painting ${
             REDRAW_STYLES.find((s) => s.id === defaultRedrawStyle)?.label || 'Watercolor'
-          } illustration for Page ${i + 1} of ${snapshot.length}...`
+          } art for Page ${i + 1} of ${snapshot.length}...`
         );
         await yieldToBrowser();
-        await handleRedrawSinglePage(page.id, defaultRedrawStyle, page, i, snapshot.length);
-        succeeded++;
+
+        const outcome = await handleRedrawSinglePage(
+          page.id,
+          defaultRedrawStyle,
+          page,
+          i,
+          snapshot.length,
+          controller.signal
+        );
+
+        if (outcome === 'ok') {
+          succeeded++;
+        } else if (outcome === 'aborted') {
+          cancelledByUser = true;
+          break;
+        } else if (outcome === 'quota') {
+          stoppedByQuota = true;
+          break;
+        }
+
         setBatchProgressPercent(Math.round(((i + 1) / snapshot.length) * 100));
+
+        // Gentle pacing pause between pages to stay friendly to free-tier RPM limits
+        if (i < snapshot.length - 1 && !controller.signal.aborted) {
+          await new Promise((r) => window.setTimeout(r, 750));
+        }
       }
-      setStudioBanner(
-        `Finished generating fresh matching illustrations across ${succeeded} ${
-          succeeded === 1 ? 'page' : 'pages'
-        }.`
-      );
+
+      if (stoppedByQuota) {
+        setStudioBanner(
+          `Painted ${succeeded} ${succeeded === 1 ? 'page' : 'pages'} before reaching the free-tier rate limit. Wait ~30 seconds to paint remaining pages, or pick an instant Painterly Scene!`
+        );
+      } else if (cancelledByUser) {
+        setStudioBanner(
+          `Stopped batch painting after ${succeeded} ${succeeded === 1 ? 'page' : 'pages'}.`
+        );
+      } else {
+        setStudioBanner(
+          `Finished painting fresh illustrations across ${succeeded} ${
+            succeeded === 1 ? 'page' : 'pages'
+          }.`
+        );
+      }
     } finally {
+      batchAbortRef.current = null;
       setIsBatchGenerating(false);
       setBatchProgressText(null);
       setBatchProgressPercent(0);
@@ -983,6 +1132,7 @@ export function StoryScanner({
                   watercolorDataUrl: watercolorUrl,
                   framedOverrideUrl: null,
                   mediaDirty: true,
+                  redrawError: null,
                 }
               : item
           )
@@ -997,10 +1147,101 @@ export function StoryScanner({
     setReviewedPages((prev) =>
       prev.map((item) =>
         item.id === pageId
-          ? { ...item, visualMode: mode, framedOverrideUrl: null, mediaDirty: true }
+          ? {
+              ...item,
+              visualMode: mode,
+              framedOverrideUrl: null,
+              isSmartFramed: mode === 'scene' || mode === 'redraw' ? false : item.isSmartFramed,
+              mediaDirty: true,
+              redrawError: mode === 'scene' ? null : item.redrawError,
+            }
           : item
       )
     );
+  };
+
+  const handleSelectPageScene = (pageId: string, sceneId: BackdropId) => {
+    setReviewedPages((prev) =>
+      prev.map((item) =>
+        item.id === pageId
+          ? {
+              ...item,
+              visualMode: 'scene',
+              sceneBackdropId: sceneId,
+              framedOverrideUrl: null,
+              isSmartFramed: false,
+              mediaDirty: true,
+              redrawError: null,
+              redrawIsQuota: false,
+            }
+          : item
+      )
+    );
+  };
+
+  const handleToggleSmartFrame = async (pageId: string) => {
+    const target = reviewedPages.find((p) => p.id === pageId);
+    if (!target || !target.originalDataUrl || !target.artCropBox) return;
+
+    if (target.isSmartFramed) {
+      setReviewedPages((prev) =>
+        prev.map((item) =>
+          item.id === pageId
+            ? { ...item, isSmartFramed: false, framedOverrideUrl: null, mediaDirty: true }
+            : item
+        )
+      );
+      return;
+    }
+
+    if (target.smartFramedUrl) {
+      setReviewedPages((prev) =>
+        prev.map((item) =>
+          item.id === pageId
+            ? {
+                ...item,
+                visualMode: item.visualMode === 'photo' ? 'photo' : 'watercolor',
+                isSmartFramed: true,
+                framedOverrideUrl: null,
+                mediaDirty: true,
+              }
+            : item
+        )
+      );
+      return;
+    }
+
+    setReplacingPageId(pageId);
+    setReplacingPageProgress({
+      pageId,
+      percent: 24,
+      stage: 'Smart-framing book artwork...',
+    });
+    await yieldToBrowser();
+    try {
+      const smartUrl = await renderSmartFramedArt(
+        target.originalDataUrl,
+        target.artCropBox,
+        target.visualMode !== 'photo'
+      );
+      setReviewedPages((prev) =>
+        prev.map((item) =>
+          item.id === pageId
+            ? {
+                ...item,
+                visualMode: item.visualMode === 'photo' ? 'photo' : 'watercolor',
+                smartFramedUrl: smartUrl,
+                isSmartFramed: true,
+                framedOverrideUrl: null,
+                mediaDirty: true,
+              }
+            : item
+        )
+      );
+    } finally {
+      setReplacingPageId(null);
+      setReplacingPageProgress(null);
+    }
   };
 
   const handleTriggerReplacePhoto = (pageId: string) => {
@@ -1109,11 +1350,22 @@ export function StoryScanner({
       ...source,
       text: partA,
     };
+    const nextSceneIdx =
+      (BACKDROP_SCENE_CATALOG.findIndex((b) => b.id === source.sceneBackdropId) + 1) %
+      BACKDROP_SCENE_CATALOG.length;
+    const nextSceneId = BACKDROP_SCENE_CATALOG[nextSceneIdx]?.id || draftBackdrop;
+
     const pageB: ReviewedPageDraft = {
       id: newPageId,
       text: partB,
       sceneSummary: `Illustration showing: ${partB.slice(0, 180)}`,
-      visualMode: source.originalDataUrl ? 'watercolor' : 'redraw',
+      visualMode:
+        source.visualMode === 'scene'
+          ? 'scene'
+          : source.originalDataUrl && source.hasIllustration !== false
+            ? 'watercolor'
+            : 'scene',
+      sceneBackdropId: nextSceneId,
       artStyle: source.artStyle,
       mediaDirty: true,
       originalDataUrl: source.originalDataUrl,
@@ -1121,6 +1373,10 @@ export function StoryScanner({
       watercolorDataUrl: source.watercolorDataUrl,
       redrawnDataUrl: null,
       framedOverrideUrl: null,
+      hasIllustration: source.hasIllustration,
+      artCropBox: source.artCropBox,
+      smartFramedUrl: source.smartFramedUrl,
+      isSmartFramed: source.isSmartFramed,
       hotspots: [
         {
           id: `hs_${newPageId}_1`,
@@ -1152,9 +1408,9 @@ export function StoryScanner({
       setCoverPageIndex((c) => c + 1);
     }
     setStudioBanner(
-      `Split Page ${index + 1} into Pages ${index + 1} & ${index + 2}. Click "Paint AI Art" on Page ${
+      `Split Page ${index + 1} into Pages ${index + 1} & ${index + 2}. Pick a Painterly Scene or tap "Paint AI Art" on Page ${
         index + 2
-      } for its own fresh illustration!`
+      } anytime!`
     );
   };
 
@@ -1175,11 +1431,15 @@ export function StoryScanner({
       return;
     }
     const newId = sanitizeId(`page_new_${Date.now()}`);
+    const nextScene =
+      BACKDROP_SCENE_CATALOG[reviewedPages.length % BACKDROP_SCENE_CATALOG.length]?.id ||
+      draftBackdrop;
     const newPage: ReviewedPageDraft = {
       id: newId,
       text: '',
       sceneSummary: 'Cozy storybook scene matching the story text on this page',
-      visualMode: 'redraw',
+      visualMode: 'scene',
+      sceneBackdropId: nextScene,
       artStyle: defaultRedrawStyle,
       mediaDirty: true,
       originalDataUrl: null,
@@ -1187,6 +1447,10 @@ export function StoryScanner({
       watercolorDataUrl: null,
       redrawnDataUrl: null,
       framedOverrideUrl: null,
+      hasIllustration: false,
+      artCropBox: null,
+      smartFramedUrl: null,
+      isSmartFramed: false,
       hotspots: [
         {
           id: `hs_${newId}_1`,
@@ -1201,7 +1465,7 @@ export function StoryScanner({
     };
     setReviewedPages((prev) => [...prev, newPage]);
     setStudioBanner(
-      `Added Page ${reviewedPages.length + 1}. Type your story text, then click "Upload Image" or "Paint AI Art".`
+      `Added Page ${reviewedPages.length + 1} with a Painterly Scene. Upload a photo or tap "Paint AI Art" anytime.`
     );
   };
 
@@ -1459,7 +1723,8 @@ export function StoryScanner({
   };
 
   /**
-   * Imports extra photos/screenshots directly into an existing open book in the Studio.
+   * Imports extra photos/screenshots directly into an existing open book in the Studio
+   * using a single fast free-tier scan call (no blocking AI redraw loop).
    */
   const handleImportExtraPhotos = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
@@ -1475,34 +1740,38 @@ export function StoryScanner({
     const batchFiles = files.slice(0, Math.min(MAX_UPLOAD_BATCH, remainingPageSlots));
     setIsImportingExtra(true);
     setErrorMsg(null);
-    setExtraImportProgress(5);
-    setExtraImportStatus(`Uploading ${batchFiles.length} newly added photo(s)...`);
+    setExtraImportProgress(8);
+    setExtraImportStatus(`Optimizing ${batchFiles.length} photo(s) for fast scanning...`);
     await yieldToBrowser();
 
     try {
-      const prepared: Array<{ dataUrl: string; mimeType: string; watercolorUrl: string }> = [];
+      const prepared: Array<{ dataUrl: string; mimeType: string }> = [];
       for (let i = 0; i < batchFiles.length; i++) {
         const file = batchFiles[i];
-        const basePct = 5 + (i / batchFiles.length) * 35;
-        const span = 35 / batchFiles.length;
-        setExtraImportStatus(`Processing photo ${i + 1} of ${batchFiles.length}...`);
-        const { dataUrl, mimeType } = await fileToCompressedDataUrl(file, 1400, 0.88, (pct) => {
-          setExtraImportProgress(Math.round(basePct + span * (pct / 100) * 0.5));
-        });
-        const watercolorUrl = await renderWatercolorStorybookStyle(dataUrl, (pct) => {
-          setExtraImportProgress(Math.round(basePct + span * (0.5 + (pct / 100) * 0.5)));
-        });
-        prepared.push({ dataUrl, mimeType, watercolorUrl });
+        const basePct = 8 + (i / batchFiles.length) * 26;
+        const span = 26 / batchFiles.length;
+        setExtraImportStatus(`Preparing photo ${i + 1} of ${batchFiles.length}...`);
+        const { dataUrl, mimeType } = await fileToCompressedDataUrl(
+          file,
+          LOCAL_DISPLAY_MAX_DIM,
+          LOCAL_DISPLAY_QUALITY,
+          (pct) => {
+            setExtraImportProgress(Math.round(basePct + span * (pct / 100)));
+          }
+        );
+        prepared.push({ dataUrl, mimeType });
         await yieldToBrowser();
       }
 
-      setExtraImportProgress(45);
-      setExtraImportStatus(`Scanning text from ${batchFiles.length} photo(s)...`);
+      setExtraImportProgress(40);
+      setExtraImportStatus(`Reading story text from ${batchFiles.length} photo(s)...`);
       await yieldToBrowser();
 
       const compactPagesForApi = [];
       for (const p of prepared) {
-        compactPagesForApi.push(await compressDataUrlForApi(p.dataUrl, 1080, 0.74));
+        compactPagesForApi.push(
+          await compressDataUrlForApi(p.dataUrl, SCAN_API_MAX_DIM, SCAN_API_QUALITY)
+        );
       }
 
       const data = await postApiJson<Record<string, unknown>>(
@@ -1520,12 +1789,13 @@ export function StoryScanner({
         },
         'Could not read extra photos.'
       );
-      setExtraImportProgress(65);
+      setExtraImportProgress(78);
 
       const apiPages: Array<Record<string, unknown>> = Array.isArray(data.pages)
         ? data.pages.slice(0, remainingPageSlots)
         : [];
       const baseIndex = reviewedPages.length;
+      const watercolorBySource = new Map<number, string>();
       const appended: ReviewedPageDraft[] = [];
 
       for (let i = 0; i < apiPages.length; i++) {
@@ -1542,35 +1812,17 @@ export function StoryScanner({
         const sceneSummary = String(
           aiPage.sceneSummary || `Page ${baseIndex + i + 1} illustration`
         ).slice(0, 300);
+        const pageSceneId = normalizeBackdropId(aiPage.suggestedBackdrop, draftBackdrop);
+        const hasIllustration = aiPage.hasIllustration !== false;
+        const artCropBox = hasIllustration ? sanitizeArtCropBox(aiPage.artCropBox) : null;
 
-        let redrawnDataUrl: string | null = null;
-        let redrawNote: string | undefined;
-        let redrawError: string | null = null;
-        let visualMode: VisualMode = extraAutoIllustrate ? 'redraw' : 'watercolor';
-
-        if (extraAutoIllustrate) {
-          setExtraImportProgress(
-            Math.min(98, 65 + Math.round((i / Math.max(1, apiPages.length)) * 33))
-          );
-          setExtraImportStatus(
-            `Painting matching illustration for imported page ${i + 1} of ${apiPages.length}...`
-          );
-          try {
-            const painted = await requestAiRedrawIllustration({
-              imageBase64: src.dataUrl,
-              mimeType: src.mimeType,
-              sceneSummary,
-              pageText,
-              artStyle: defaultRedrawStyle,
-              pageNumber: baseIndex + i + 1,
-              totalPages: baseIndex + apiPages.length,
-            });
-            redrawnDataUrl = painted.dataUrl;
-            redrawNote = painted.styleNote;
-          } catch (paintErr) {
-            redrawError =
-              paintErr instanceof Error ? paintErr.message : 'Illustration did not finish.';
-            visualMode = 'watercolor';
+        const useSceneMode = extraUseScenes || !hasIllustration;
+        let watercolorUrl: string | null = null;
+        if (!useSceneMode) {
+          watercolorUrl = watercolorBySource.get(srcIdx) || null;
+          if (!watercolorUrl) {
+            watercolorUrl = await renderWatercolorStorybookStyle(src.dataUrl);
+            watercolorBySource.set(srcIdx, watercolorUrl);
           }
         }
 
@@ -1604,15 +1856,19 @@ export function StoryScanner({
           id: pageUid,
           text: pageText,
           sceneSummary,
-          visualMode,
+          visualMode: useSceneMode ? 'scene' : 'watercolor',
+          sceneBackdropId: pageSceneId,
           artStyle: defaultRedrawStyle,
           mediaDirty: true,
           originalDataUrl: src.dataUrl,
           mimeType: src.mimeType,
-          watercolorDataUrl: src.watercolorUrl,
-          redrawnDataUrl,
-          redrawNote,
-          redrawError,
+          watercolorDataUrl: watercolorUrl,
+          redrawnDataUrl: null,
+          framedOverrideUrl: null,
+          hasIllustration,
+          artCropBox,
+          smartFramedUrl: null,
+          isSmartFramed: false,
           hotspots,
         });
       }
@@ -1634,34 +1890,62 @@ export function StoryScanner({
     }
   };
 
+  const handleCancelScan = () => {
+    scanAbortRef.current?.abort();
+    scanAbortRef.current = null;
+    setStep('capture');
+    setConversionProgress(0);
+  };
+
   const handleConvertPages = async () => {
     if (capturedPages.length === 0) {
       setErrorMsg('Add at least one storybook page photo or screenshot first.');
       return;
     }
 
+    scanAbortRef.current?.abort();
+    const controller = new AbortController();
+    scanAbortRef.current = controller;
+
     setErrorMsg(null);
     setStudioBanner(null);
     setStep('converting');
-    setConversionProgress(8);
+    setConversionProgress(10);
     setConversionStatus(
-      autoSplitPages
-        ? 'Reading every printed word and splitting into short kid-friendly pages...'
-        : textMode === 'verbatim'
-          ? 'Reading every printed word from your storybook photos...'
-          : 'Reading and adapting storybook text for your child...'
+      `Compressing ${capturedPages.length} ${
+        capturedPages.length === 1 ? 'photo' : 'photos'
+      } for fast free-tier scanning...`
     );
     await yieldToBrowser();
 
     try {
+      // Lightweight 768px / 0.60 JPEG payload cuts upload size & vision tokens by ~55%
       const compactPagesForApi = [];
       for (let i = 0; i < capturedPages.length; i++) {
+        if (controller.signal.aborted) {
+          throw new ApiRequestError('Scan cancelled.', { code: 'ABORTED' });
+        }
         compactPagesForApi.push(
-          await compressDataUrlForApi(capturedPages[i].originalDataUrl, 1080, 0.74)
+          await compressDataUrlForApi(
+            capturedPages[i].originalDataUrl,
+            SCAN_API_MAX_DIM,
+            SCAN_API_QUALITY
+          )
         );
-        setConversionProgress(8 + Math.round(((i + 1) / capturedPages.length) * 14));
+        setConversionProgress(10 + Math.round(((i + 1) / capturedPages.length) * 18));
       }
 
+      setConversionProgress(35);
+      setConversionStatus(
+        autoSplitPages
+          ? 'Reading printed text and splitting into short kid-friendly pages...'
+          : textMode === 'verbatim'
+            ? 'Reading every printed word from your photos...'
+            : 'Reading and adapting storybook text for your child...'
+      );
+      await yieldToBrowser();
+
+      // Single fast free-tier Gemini call (ThinkingLevel.MINIMAL) — zero blocking redraw loop!
       const data = await postApiJson<Record<string, unknown>>(
         '/api/stories/scan',
         {
@@ -1675,9 +1959,19 @@ export function StoryScanner({
             mimeType: p.mimeType,
           })),
         },
-        'Could not convert storybook pages.'
+        'Could not convert storybook pages.',
+        { signal: controller.signal, timeoutMs: SCAN_TIMEOUT_MS }
       );
 
+      if (controller.signal.aborted) {
+        throw new ApiRequestError('Scan cancelled.', { code: 'ABORTED' });
+      }
+
+      setConversionProgress(76);
+      setConversionStatus('Finishing watercolor pages and opening Review Studio...');
+      await yieldToBrowser();
+
+      const safeBackdrop = normalizeBackdropId(data.suggestedBackdrop, 'meadow');
       const apiPages: Array<Record<string, unknown>> =
         Array.isArray(data.pages) && data.pages.length > 0
           ? data.pages.slice(0, MAX_STORY_PAGES)
@@ -1685,12 +1979,15 @@ export function StoryScanner({
               sourcePhotoIndex: idx,
               text: 'Tap Play to listen to this storybook page.',
               sceneSummary: `Page ${idx + 1} illustration`,
+              suggestedBackdrop: safeBackdrop,
+              hasIllustration: true,
               hotspots: [],
             }));
 
-      // Cache watercolor retouch per source photo so split pages don't recompute canvas filters needlessly
+      // Cache watercolor retouch per unique source photo so split pages compute at most once
       const watercolorBySource = new Map<number, string>();
       const builtReviewed: ReviewedPageDraft[] = [];
+      let autoMatchedSceneCount = 0;
 
       for (let i = 0; i < apiPages.length; i++) {
         const aiPage = apiPages[i] || {};
@@ -1707,48 +2004,33 @@ export function StoryScanner({
           aiPage.sceneSummary || `Page ${i + 1} illustration`
         ).slice(0, 300);
 
-        let watercolorUrl = watercolorBySource.get(sourceIdx) || cap.watercolorDataUrl;
-        if (!watercolorUrl) {
+        const pageBackdrop = normalizeBackdropId(
+          aiPage.suggestedBackdrop,
+          BACKDROP_SCENE_CATALOG[i % BACKDROP_SCENE_CATALOG.length]?.id || safeBackdrop
+        );
+        const hasIllustration = aiPage.hasIllustration !== false;
+        const artCropBox = hasIllustration ? sanitizeArtCropBox(aiPage.artCropBox) : null;
+
+        // Text-only screenshots automatically receive matched painterly watercolor scenes (0 extra API calls)
+        let resolvedVisualMode: VisualMode;
+        if (cap.visualMode === 'scene' || (!hasIllustration && cap.visualMode !== 'photo')) {
+          resolvedVisualMode = 'scene';
+          autoMatchedSceneCount++;
+        } else if (cap.visualMode === 'photo') {
+          resolvedVisualMode = 'photo';
+        } else {
+          resolvedVisualMode = 'watercolor';
+        }
+
+        let watercolorUrl: string | null = watercolorBySource.get(sourceIdx) || cap.watercolorDataUrl;
+        if (resolvedVisualMode === 'watercolor' && !watercolorUrl) {
           watercolorUrl = await renderWatercolorStorybookStyle(cap.originalDataUrl);
           watercolorBySource.set(sourceIdx, watercolorUrl);
         }
 
-        const shouldPaintAi = cap.visualMode === 'redraw' || defaultVisualMode === 'redraw';
         setConversionProgress(
-          Math.min(96, 32 + Math.round((i / Math.max(1, apiPages.length)) * 64))
+          Math.min(98, 76 + Math.round(((i + 1) / Math.max(1, apiPages.length)) * 22))
         );
-        setConversionStatus(
-          shouldPaintAi
-            ? `Painting unique matching illustration for Page ${i + 1} of ${apiPages.length}...`
-            : `Preparing Page ${i + 1} of ${apiPages.length} watercolor spread...`
-        );
-
-        let redrawnDataUrl: string | null = null;
-        let redrawNote: string | undefined;
-        let redrawError: string | null = null;
-        let resolvedVisualMode: VisualMode = shouldPaintAi ? 'redraw' : cap.visualMode;
-
-        if (shouldPaintAi) {
-          try {
-            const redrawn = await requestAiRedrawIllustration({
-              imageBase64: cap.originalDataUrl,
-              mimeType: cap.mimeType,
-              sceneSummary,
-              pageText,
-              artStyle: defaultRedrawStyle,
-              pageNumber: i + 1,
-              totalPages: apiPages.length,
-            });
-            redrawnDataUrl = redrawn.dataUrl;
-            redrawNote = redrawn.styleNote;
-          } catch (redrawErr) {
-            redrawError =
-              redrawErr instanceof Error
-                ? redrawErr.message
-                : 'Illustration did not complete; showing Watercolor Retouch instead.';
-            resolvedVisualMode = 'watercolor';
-          }
-        }
 
         const rawHotspots = Array.isArray(aiPage.hotspots) ? aiPage.hotspots : [];
         const hotspots: CharacterHotspot[] =
@@ -1780,24 +2062,21 @@ export function StoryScanner({
           text: pageText,
           sceneSummary,
           visualMode: resolvedVisualMode,
+          sceneBackdropId: pageBackdrop,
           artStyle: defaultRedrawStyle,
           mediaDirty: true,
           originalDataUrl: cap.originalDataUrl,
           mimeType: cap.mimeType,
           watercolorDataUrl: watercolorUrl,
-          redrawnDataUrl,
-          redrawNote,
-          redrawError,
+          redrawnDataUrl: null,
+          framedOverrideUrl: null,
+          hasIllustration,
+          artCropBox,
+          smartFramedUrl: null,
+          isSmartFramed: false,
           hotspots,
         });
       }
-
-      const backdropCandidate = String(data.suggestedBackdrop || 'forest');
-      const safeBackdrop: BackdropId = (
-        ['pond', 'forest', 'twilight', 'bridge'].includes(backdropCandidate)
-          ? backdropCandidate
-          : 'forest'
-      ) as BackdropId;
 
       setDraftTitle(String(data.title || titleHint || 'Our Family Storybook').slice(0, 120));
       setDraftSubtitle(
@@ -1817,21 +2096,36 @@ export function StoryScanner({
       setDraftBackdrop(safeBackdrop);
       setCoverPageIndex(0);
       setReviewedPages(builtReviewed);
-      if (builtReviewed.length > capturedPages.length) {
+
+      if (autoMatchedSceneCount > 0) {
+        setStudioBanner(
+          `Scanned ${builtReviewed.length} ${
+            builtReviewed.length === 1 ? 'page' : 'pages'
+          } in one fast pass! Text-only pages were paired with built-in watercolor scenes — switch scenes, use your photo, or paint custom AI art on any page.`
+        );
+      } else if (builtReviewed.length > capturedPages.length) {
         setStudioBanner(
           `Auto-split ${capturedPages.length} ${
             capturedPages.length === 1 ? 'photo' : 'photos'
-          } into ${builtReviewed.length} short, kid-friendly pages with matching illustrations!`
+          } into ${builtReviewed.length} short, kid-friendly pages. Switch any page to Watercolor, Smart Frame, a Painterly Scene, or On-Demand AI Art!`
         );
       }
+
+      setConversionProgress(100);
       setStep('review');
     } catch (err) {
+      if (err instanceof ApiRequestError && err.code === 'ABORTED') {
+        setStep('capture');
+        return;
+      }
       setErrorMsg(
         err instanceof Error
           ? err.message
           : 'Something went wrong while scanning your storybook pages.'
       );
       setStep('capture');
+    } finally {
+      scanAbortRef.current = null;
     }
   };
 
@@ -1855,15 +2149,20 @@ export function StoryScanner({
 
       for (let i = 0; i < reviewedPages.length; i++) {
         const p = reviewedPages[i];
-        const chosenImage =
-          p.framedOverrideUrl ||
-          (p.visualMode === 'redraw' && p.redrawnDataUrl
-            ? p.redrawnDataUrl
-            : p.visualMode === 'watercolor' && p.watercolorDataUrl
-              ? p.watercolorDataUrl
-              : p.originalDataUrl || p.redrawnDataUrl || p.watercolorDataUrl);
+        const isPureScenePage = p.visualMode === 'scene' && !p.framedOverrideUrl;
 
-        let mediaId = p.existingMediaId || '';
+        const chosenImage = isPureScenePage
+          ? null
+          : p.framedOverrideUrl ||
+            (p.visualMode === 'redraw' && p.redrawnDataUrl
+              ? p.redrawnDataUrl
+              : p.isSmartFramed && p.smartFramedUrl
+                ? p.smartFramedUrl
+                : p.visualMode === 'watercolor' && p.watercolorDataUrl
+                  ? p.watercolorDataUrl
+                  : p.originalDataUrl || p.redrawnDataUrl || p.watercolorDataUrl);
+
+        let mediaId = isPureScenePage ? '' : p.existingMediaId || '';
         if (chosenImage && (p.mediaDirty || !mediaId)) {
           mediaId = sanitizeId(`media_${storyId}_p${i + 1}_${saveNonce}`);
           await saveStoryMedia(storyId, mediaId, chosenImage);
@@ -1875,12 +2174,13 @@ export function StoryScanner({
           sceneSummary: p.sceneSummary.trim() || `Page ${i + 1} illustration`,
           mediaId: mediaId || undefined,
           visualMode: p.visualMode,
-          fallbackArtId: draftBackdrop,
+          fallbackArtId: normalizeBackdropId(p.sceneBackdropId || draftBackdrop, 'meadow'),
           hotspots: p.hotspots,
         });
       }
 
       const safeCoverIdx = Math.max(0, Math.min(pagesToSave.length - 1, coverPageIndex));
+      const coverPage = pagesToSave[safeCoverIdx] || pagesToSave[0];
       const totalWords = pagesToSave.reduce((acc, p) => acc + countWords(p.text), 0);
       const estimatedMinutes = Math.max(1, Math.min(20, Math.ceil(totalWords / 110)));
 
@@ -1894,8 +2194,8 @@ export function StoryScanner({
           draftMoralLesson.trim() || 'Every story teaches us something gentle and good.',
         parentDiscussionPrompt:
           draftDiscussionPrompt.trim() || 'What was your favorite picture in this book?',
-        coverMediaId: pagesToSave[safeCoverIdx]?.mediaId || pagesToSave[0]?.mediaId,
-        coverFallbackId: draftBackdrop,
+        coverMediaId: coverPage?.mediaId ?? '',
+        coverFallbackId: normalizeBackdropId(coverPage?.fallbackArtId || draftBackdrop, 'meadow'),
         readMinutes: estimatedMinutes,
         isCustom: true,
         pages: pagesToSave,
@@ -1942,10 +2242,10 @@ export function StoryScanner({
         </h1>
         <p className="text-sm sm:text-base text-[#5C646B] dark:text-[#A4AEC2] max-w-2xl leading-relaxed">
           {isEditMode
-            ? 'Polish story text, split long pages for easier reading, generate matching watercolor illustrations, resize or replace images, reorder pages, or import extra photos.'
+            ? 'Polish story text, split long pages for easier reading, choose built-in watercolor scenes or retouched photos, paint optional AI art, crop images, reorder pages, or import extra photos.'
             : createMode === 'manual'
-              ? 'Write or paste your own story text, auto-split it into short kid-friendly pages, and upload your own photos or artwork directly — works 100% locally with zero scan required.'
-              : 'Snap or upload book pages or story screenshots. Meadowtale reads every printed word verbatim, auto-splits dense text into short kid-friendly pages, and paints a unique watercolor illustration for each page.'}
+              ? 'Write or paste your own story text, auto-split it into short kid-friendly pages, and upload your own photos or pick built-in painterly scenes — works 100% locally with zero scan required.'
+              : 'Snap or upload book pages or screenshots for a fast single-pass scan. Keep softly retouched watercolor photos, pair text with 8 built-in painterly scenes, or paint optional AI illustrations per page.'}
         </p>
 
         {/* Creation Method Switcher (Scan vs Write Manually) */}
@@ -2183,21 +2483,10 @@ export function StoryScanner({
               {/* Default Illustration Look */}
               <div>
                 <label className="flex items-center gap-1.5 text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
-                  <Wand2 className="w-3.5 h-3.5" />
-                  Multi-Page Artwork Style
+                  <Paintbrush className="w-3.5 h-3.5" />
+                  Default Artwork Style
                 </label>
                 <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#F2EFE8] dark:bg-[#121624] w-full">
-                  <button
-                    type="button"
-                    onClick={() => setDefaultVisualMode('redraw')}
-                    className={`flex-1 py-2 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                      defaultVisualMode === 'redraw'
-                        ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF]'
-                        : 'text-[#5C646B] dark:text-[#A4AEC2]'
-                    }`}
-                  >
-                    AI Art Per Page
-                  </button>
                   <button
                     type="button"
                     onClick={() => setDefaultVisualMode('watercolor')}
@@ -2207,7 +2496,18 @@ export function StoryScanner({
                         : 'text-[#5C646B] dark:text-[#A4AEC2]'
                     }`}
                   >
-                    Watercolor
+                    Watercolor Photo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDefaultVisualMode('scene')}
+                    className={`flex-1 py-2 px-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                      defaultVisualMode === 'scene'
+                        ? 'bg-white dark:bg-[#27304A] text-[#24292E] dark:text-[#EDE9DF]'
+                        : 'text-[#5C646B] dark:text-[#A4AEC2]'
+                    }`}
+                  >
+                    Painterly Scenes
                   </button>
                   <button
                     type="button"
@@ -2222,16 +2522,16 @@ export function StoryScanner({
                   </button>
                 </div>
                 <p className="mt-1.5 text-[11px] text-[#5C646B] dark:text-[#A4AEC2]">
-                  {defaultVisualMode === 'redraw'
-                    ? 'Paints a unique, text-free free-tier watercolor scene matched to each split page.'
-                    : defaultVisualMode === 'watercolor'
-                      ? 'Brightens and softens your photos into painterly watercolor spreads.'
-                      : 'Keeps your original uploaded photos (you can still crop or paint any page in Review).'}
+                  {defaultVisualMode === 'watercolor'
+                    ? 'Instantly softens book photos into watercolor spreads; text-only screenshots automatically pair with matching painterly scenes.'
+                    : defaultVisualMode === 'scene'
+                      ? 'Pairs every page with our 8 built-in watercolor scenes — instant, crisp, and ideal for text screenshots.'
+                      : 'Keeps your original photos as-is (you can still crop, retouch, pick a scene, or paint AI art in Review).'}
                 </p>
               </div>
 
-              {/* Target Age Group + Illustration Palette + Title Hint */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {/* Target Age Group + Optional Title Hint */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start">
                 <div>
                   <label className="block text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
                     Target Age Group
@@ -2255,26 +2555,9 @@ export function StoryScanner({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
-                    AI Watercolor Palette
-                  </label>
-                  <select
-                    value={defaultRedrawStyle}
-                    onChange={(e) => setDefaultRedrawStyle(e.target.value as RedrawStyle)}
-                    className="w-full px-3 py-2 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] focus:outline-2 focus:outline-[#2F7A5E]"
-                  >
-                    {REDRAW_STYLES.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="sm:col-span-2">
                   <label
                     htmlFor="scan-title-hint"
-                    className="block text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-1.5"
+                    className="block text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2"
                   >
                     Book Title (Optional)
                   </label>
@@ -2366,15 +2649,16 @@ export function StoryScanner({
                         <img
                           src={previewUrl}
                           alt={`Uploaded photo ${idx + 1}`}
+                          referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
-                        {page.visualMode === 'redraw' && (
+                        {page.visualMode === 'scene' && (
                           <div className="absolute bottom-2 left-2 right-2 px-2.5 py-1.5 rounded-lg bg-[#1A2033]/85 text-[#FAF8F4] text-[11px] font-medium flex items-center gap-1.5">
-                            <Wand2 className="w-3.5 h-3.5 text-[#E5A94C] shrink-0" />
+                            <Palette className="w-3.5 h-3.5 text-[#E5A94C] shrink-0" />
                             <span>
                               {autoSplitPages
-                                ? 'Will split & paint fresh art per page'
-                                : 'Will paint clean watercolor art'}
+                                ? 'Will split & pair with painterly scenes'
+                                : 'Will pair with a matching painterly scene'}
                             </span>
                           </div>
                         )}
@@ -2392,26 +2676,14 @@ export function StoryScanner({
                         <div className="flex items-center justify-between text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] mb-2.5">
                           <span>Photo {idx + 1}</span>
                           <span className="text-[#5C646B] dark:text-[#A4AEC2] font-normal">
-                            {page.visualMode === 'redraw'
-                              ? 'AI Watercolor'
-                              : page.visualMode === 'watercolor'
-                                ? 'Watercolor Retouch'
+                            {page.visualMode === 'watercolor'
+                              ? 'Watercolor Retouch'
+                              : page.visualMode === 'scene'
+                                ? 'Painterly Scene'
                                 : 'Original Photo'}
                           </span>
                         </div>
                         <div className="grid grid-cols-3 gap-1">
-                          <button
-                            type="button"
-                            onClick={() => void toggleCapturedVisualMode(page.id, 'redraw')}
-                            className={`inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
-                              page.visualMode === 'redraw'
-                                ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
-                                : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
-                            }`}
-                          >
-                            <Wand2 className="w-3 h-3" />
-                            AI Art
-                          </button>
                           <button
                             type="button"
                             onClick={() => void toggleCapturedVisualMode(page.id, 'watercolor')}
@@ -2422,7 +2694,19 @@ export function StoryScanner({
                             }`}
                           >
                             <Paintbrush className="w-3 h-3" />
-                            Retouch
+                            Watercolor
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void toggleCapturedVisualMode(page.id, 'scene')}
+                            className={`inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${
+                              page.visualMode === 'scene'
+                                ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
+                                : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
+                            }`}
+                          >
+                            <Palette className="w-3 h-3" />
+                            Scene
                           </button>
                           <button
                             type="button"
@@ -2467,10 +2751,10 @@ export function StoryScanner({
                 >
                   <Sparkles className="w-4 h-4" />
                   {autoSplitPages
-                    ? `Scan, Auto-Split & Illustrate ${capturedPages.length} ${
+                    ? `Fast Scan & Split ${capturedPages.length} ${
                         capturedPages.length === 1 ? 'Photo' : 'Photos'
                       }`
-                    : `Read & Convert ${capturedPages.length} ${
+                    : `Fast Scan ${capturedPages.length} ${
                         capturedPages.length === 1 ? 'Photo' : 'Photos'
                       }`}
                 </button>
@@ -2493,23 +2777,33 @@ export function StoryScanner({
             {isHydratingEdit ? 'Loading pages and high-resolution artwork...' : conversionStatus}
           </p>
           {!isHydratingEdit && (
-            <div className="max-w-md mx-auto mt-5 space-y-1.5">
-              <div
-                role="progressbar"
-                aria-valuenow={conversionProgress}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={conversionStatus}
-                className="h-2.5 w-full rounded-full bg-[#E6E1D8] dark:bg-[#27304A] overflow-hidden"
-              >
+            <div className="max-w-md mx-auto mt-5 space-y-3">
+              <div className="space-y-1.5">
                 <div
-                  className="h-full rounded-full bg-[#2F7A5E] dark:bg-[#E5A94C] transition-[width] duration-200 ease-out"
-                  style={{ width: `${Math.max(6, conversionProgress)}%` }}
-                />
+                  role="progressbar"
+                  aria-valuenow={conversionProgress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={conversionStatus}
+                  className="h-2.5 w-full rounded-full bg-[#E6E1D8] dark:bg-[#27304A] overflow-hidden"
+                >
+                  <div
+                    className="h-full rounded-full bg-[#2F7A5E] dark:bg-[#E5A94C] transition-[width] duration-200 ease-out"
+                    style={{ width: `${Math.max(6, conversionProgress)}%` }}
+                  />
+                </div>
+                <div className="text-xs font-mono tabular-nums font-semibold text-[#5C646B] dark:text-[#A4AEC2]">
+                  {Math.max(6, conversionProgress)}%
+                </div>
               </div>
-              <div className="text-xs font-mono tabular-nums font-semibold text-[#5C646B] dark:text-[#A4AEC2]">
-                {Math.max(6, conversionProgress)}%
-              </div>
+              <button
+                type="button"
+                onClick={handleCancelScan}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-[#D8D1C4] dark:border-[#34405E] hover:bg-[#F3EFE8] dark:hover:bg-[#232B42] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] transition-colors cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+                Cancel Scan
+              </button>
             </div>
           )}
         </div>
@@ -2526,7 +2820,7 @@ export function StoryScanner({
                   {isEditMode ? 'Storybook Studio' : 'Review & Customize Your Book'}
                 </h2>
                 <p className="text-xs text-[#5C646B] dark:text-[#A4AEC2] mt-0.5">
-                  Edit text, split long pages, generate fresh watercolor art per page, resize/crop images, reorder pages, or import extra photos.
+                  Edit text, split long pages, switch between Watercolor Photo, 8 Painterly Scenes, or optional on-demand AI art, smart-frame or crop images, reorder pages, or import extra photos.
                 </p>
               </div>
 
@@ -2588,7 +2882,7 @@ export function StoryScanner({
                   onChange={(e) => setDraftBackdrop(e.target.value as BackdropId)}
                   className="w-full px-3 py-2.5 rounded-xl bg-[#FAF8F4] dark:bg-[#121624] border border-[#D8D1C4] dark:border-[#34405E] text-sm font-medium text-[#24292E] dark:text-[#EDE9DF]"
                 >
-                  {BACKDROP_CHOICES.map((b) => (
+                  {BACKDROP_SCENE_CATALOG.map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.label}
                     </option>
@@ -2689,8 +2983,21 @@ export function StoryScanner({
                   ) : (
                     <Wand2 className="w-3.5 h-3.5" />
                   )}
-                  Paint Matching Art for All {reviewedPages.length} Pages
+                  {isBatchGenerating
+                    ? 'Painting AI Art...'
+                    : `Paint AI Art for All ${reviewedPages.length} Pages`}
                 </button>
+
+                {isBatchGenerating && (
+                  <button
+                    type="button"
+                    onClick={handleStopBatchGeneration}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#C84B58] hover:bg-[#AD3B47] text-white text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    Stop
+                  </button>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -2791,11 +3098,11 @@ export function StoryScanner({
                     <label className="inline-flex items-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
-                        checked={extraAutoIllustrate}
-                        onChange={(e) => setExtraAutoIllustrate(e.target.checked)}
+                        checked={extraUseScenes}
+                        onChange={(e) => setExtraUseScenes(e.target.checked)}
                         className="w-4 h-4 accent-[#2F7A5E] dark:accent-[#E5A94C]"
                       />
-                      Paint matching AI art automatically
+                      Pair imported pages with Painterly Scenes instead of photos
                     </label>
                   </div>
 
@@ -2839,6 +3146,7 @@ export function StoryScanner({
                         <img
                           src={displaySrc}
                           alt={`Page ${idx + 1}`}
+                          referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
 
@@ -2898,50 +3206,130 @@ export function StoryScanner({
                         )}
                       </div>
 
-                      {/* 3-Way Artwork Mode Switcher */}
-                      <div className="grid grid-cols-3 gap-1.5">
-                        <button
-                          type="button"
-                          disabled={page.isRedrawing}
-                          onClick={() => void handleSelectReviewVisualMode(page.id, 'redraw')}
-                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-xs font-semibold border cursor-pointer disabled:opacity-50 ${
-                            page.visualMode === 'redraw'
-                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
-                              : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
-                          }`}
-                        >
-                          <Wand2 className="w-3.5 h-3.5" />
-                          AI Art
-                        </button>
+                      {/* 4-Way Artwork Mode Switcher */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                         <button
                           type="button"
                           disabled={page.isRedrawing || !hasSourcePhoto}
                           onClick={() => void handleSelectReviewVisualMode(page.id, 'watercolor')}
-                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-xs font-semibold border cursor-pointer disabled:opacity-40 ${
+                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border cursor-pointer disabled:opacity-40 whitespace-nowrap ${
                             page.visualMode === 'watercolor'
                               ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
                               : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
                           }`}
                         >
-                          <Paintbrush className="w-3.5 h-3.5" />
+                          <Paintbrush className="w-3 h-3 shrink-0" />
                           Watercolor
+                        </button>
+                        <button
+                          type="button"
+                          disabled={page.isRedrawing}
+                          onClick={() => void handleSelectReviewVisualMode(page.id, 'scene')}
+                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border cursor-pointer disabled:opacity-50 whitespace-nowrap ${
+                            page.visualMode === 'scene'
+                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
+                              : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
+                          }`}
+                        >
+                          <Palette className="w-3 h-3 shrink-0" />
+                          Scene
                         </button>
                         <button
                           type="button"
                           disabled={page.isRedrawing || !hasSourcePhoto}
                           onClick={() => void handleSelectReviewVisualMode(page.id, 'photo')}
-                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-xs font-semibold border cursor-pointer disabled:opacity-40 ${
+                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border cursor-pointer disabled:opacity-40 whitespace-nowrap ${
                             page.visualMode === 'photo'
                               ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
                               : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
                           }`}
                         >
-                          <ImageIcon className="w-3.5 h-3.5" />
+                          <ImageIcon className="w-3 h-3 shrink-0" />
                           Photo
+                        </button>
+                        <button
+                          type="button"
+                          disabled={page.isRedrawing}
+                          onClick={() => void handleSelectReviewVisualMode(page.id, 'redraw')}
+                          className={`inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border cursor-pointer disabled:opacity-50 whitespace-nowrap ${
+                            page.visualMode === 'redraw'
+                              ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] border-transparent'
+                              : 'border-[#D8D1C4] dark:border-[#34405E] text-[#5C646B] dark:text-[#A4AEC2]'
+                          }`}
+                        >
+                          <Wand2 className="w-3 h-3 shrink-0" />
+                          AI Art
                         </button>
                       </div>
 
-                      {/* Style Picker + Paint / Redraw Button */}
+                      {/* Built-in 8 Painterly Scenes Visual Picker (instant, zero API calls) */}
+                      {page.visualMode === 'scene' && (
+                        <div className="p-2.5 rounded-xl bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B]">
+                          <div className="flex items-center justify-between text-[11px] font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+                            <span>Choose Painterly Scene</span>
+                            <span className="font-normal">
+                              {BACKDROP_SCENE_CATALOG.find((s) => s.id === page.sceneBackdropId)
+                                ?.label || 'Sunny Meadow'}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-4 gap-1.5">
+                            {BACKDROP_SCENE_CATALOG.map((scene) => {
+                              const selected = page.sceneBackdropId === scene.id;
+                              return (
+                                <button
+                                  key={scene.id}
+                                  type="button"
+                                  onClick={() => handleSelectPageScene(page.id, scene.id)}
+                                  title={`${scene.label} — ${scene.mood}`}
+                                  aria-label={`Use ${scene.label} scene for Page ${idx + 1}`}
+                                  aria-pressed={selected}
+                                  className={`group rounded-lg overflow-hidden border text-left transition-all cursor-pointer ${
+                                    selected
+                                      ? 'border-[#2F7A5E] dark:border-[#E5A94C] ring-2 ring-[#2F7A5E]/35 dark:ring-[#E5A94C]/40'
+                                      : 'border-[#E6E1D8] dark:border-[#2A324B] hover:border-[#2F7A5E]/60 dark:hover:border-[#E5A94C]/60'
+                                  }`}
+                                >
+                                  <div className="aspect-[4/3] overflow-hidden bg-[#EFEBE2] dark:bg-[#121624]">
+                                    <img
+                                      src={BACKDROP_ART_MAP[scene.id]}
+                                      alt={scene.label}
+                                      referrerPolicy="no-referrer"
+                                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                                    />
+                                  </div>
+                                  <div className="px-1 py-0.5 text-[10px] font-medium text-[#24292E] dark:text-[#EDE9DF] truncate text-center bg-[#FAF8F4] dark:bg-[#121624]">
+                                    {scene.label.split(' ')[0]}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 1-Tap Smart Frame Illustration Button (when scan detected artwork region) */}
+                      {hasSourcePhoto &&
+                        page.artCropBox &&
+                        page.visualMode !== 'scene' &&
+                        page.visualMode !== 'redraw' && (
+                          <button
+                            type="button"
+                            disabled={page.isRedrawing || replacingPageId === page.id}
+                            onClick={() => void handleToggleSmartFrame(page.id)}
+                            className={`w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer ${
+                              page.isSmartFramed
+                                ? 'bg-[#2F7A5E]/12 dark:bg-[#E5A94C]/15 border-[#2F7A5E]/40 dark:border-[#E5A94C]/40 text-[#1E5641] dark:text-[#F4D39B]'
+                                : 'bg-white dark:bg-[#1A2033] border-[#D8D1C4] dark:border-[#34405E] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-[#24292E] dark:text-[#EDE9DF]'
+                            }`}
+                          >
+                            <Focus className="w-3.5 h-3.5 text-[#2F7A5E] dark:text-[#E5A94C]" />
+                            {page.isSmartFramed
+                              ? 'Show Full Page Photo'
+                              : 'Smart Frame Illustration'}
+                          </button>
+                        )}
+
+                      {/* Optional On-Demand AI Art Style Picker + Paint / Redraw Button */}
                       <div className="flex items-center gap-1.5">
                         <select
                           aria-label={`Illustration style for page ${idx + 1}`}
@@ -2978,7 +3366,7 @@ export function StoryScanner({
                           {page.isRedrawing
                             ? 'Painting...'
                             : page.redrawnDataUrl
-                              ? 'Redraw Art'
+                              ? 'Redraw AI Art'
                               : 'Paint AI Art'}
                         </button>
                       </div>
@@ -3015,9 +3403,30 @@ export function StoryScanner({
                       </div>
 
                       {page.redrawError && (
-                        <p className="text-[11px] text-[#9C2F3B] dark:text-[#F299A3]">
-                          {page.redrawError}
-                        </p>
+                        <div className="p-2.5 rounded-lg bg-[#C84B58]/10 border border-[#C84B58]/30 space-y-2">
+                          <p className="text-[11px] leading-snug text-[#9C2F3B] dark:text-[#F299A3]">
+                            {page.redrawError}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={page.isRedrawing || isBatchGenerating}
+                              onClick={() => void handleRedrawSinglePage(page.id, page.artStyle)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#24292E] hover:bg-[#363D44] dark:bg-[#27304A] dark:hover:bg-[#333F61] text-white text-[11px] font-semibold disabled:opacity-50 cursor-pointer"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              Retry
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectPageScene(page.id, page.sceneBackdropId)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-[11px] font-semibold cursor-pointer"
+                            >
+                              <Palette className="w-3 h-3" />
+                              Use Painterly Scene
+                            </button>
+                          </div>
+                        </div>
                       )}
                       {page.redrawNote && page.visualMode === 'redraw' && !page.redrawError && (
                         <p className="text-[11px] text-[#2F7A5E] dark:text-[#5CA49B]">

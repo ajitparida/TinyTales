@@ -32,6 +32,7 @@ import {
   ReadingLogEntry,
   Story,
 } from '../types/story';
+import { normalizeBackdropId } from '../data/curatedStories';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -289,9 +290,7 @@ export function subscribeCustomStories(
           moralLesson: String(data.moralLesson ?? ''),
           parentDiscussionPrompt: String(data.parentDiscussionPrompt ?? ''),
           coverMediaId: String(data.coverMediaId ?? ''),
-          coverFallbackId: (['pond', 'forest', 'twilight', 'bridge'].includes(data.coverFallbackId)
-            ? data.coverFallbackId
-            : 'forest') as Story['coverFallbackId'],
+          coverFallbackId: normalizeBackdropId(data.coverFallbackId, 'forest'),
           readMinutes: Number(data.readMinutes ?? 2),
           isCustom: true,
           pages: Array.isArray(data.pages) ? data.pages : [],
@@ -321,8 +320,10 @@ function buildSanitizedCustomStoryFields(story: Story) {
         ? 'redraw'
         : p.visualMode === 'watercolor'
           ? 'watercolor'
-          : 'photo',
-    fallbackArtId: p.fallbackArtId || story.coverFallbackId || 'forest',
+          : p.visualMode === 'scene'
+            ? 'scene'
+            : 'photo',
+    fallbackArtId: normalizeBackdropId(p.fallbackArtId || story.coverFallbackId, 'forest'),
     hotspots: (p.hotspots || []).slice(0, 4).map((h, hIdx) => ({
       id: sanitizeId(h.id || `hs_${idx}_${hIdx}`),
       name: clampString(h.name, 40, 'Friend'),
@@ -333,6 +334,11 @@ function buildSanitizedCustomStoryFields(story: Story) {
       reaction: h.reaction || 'bounce',
     })),
   }));
+
+  const resolvedCoverMediaId =
+    story.coverMediaId !== undefined
+      ? story.coverMediaId
+      : sanitizedPages[0]?.mediaId || '';
 
   return {
     title: clampString(story.title, 120, 'Our Scanned Storybook'),
@@ -349,8 +355,8 @@ function buildSanitizedCustomStoryFields(story: Story) {
       240,
       'What was your favorite part of this story?'
     ),
-    coverMediaId: clampString(story.coverMediaId || sanitizedPages[0]?.mediaId || '', 128),
-    coverFallbackId: story.coverFallbackId || 'forest',
+    coverMediaId: clampString(resolvedCoverMediaId, 128),
+    coverFallbackId: normalizeBackdropId(story.coverFallbackId, 'forest'),
     readMinutes: clampNumber(story.readMinutes || sanitizedPages.length, 1, 30),
     pages: sanitizedPages,
   };
@@ -541,9 +547,7 @@ export function subscribePublishedStories(
           moralLesson: String(data.moralLesson ?? ''),
           parentDiscussionPrompt: String(data.parentDiscussionPrompt ?? ''),
           coverMediaId: String(data.coverMediaId ?? ''),
-          coverFallbackId: (['pond', 'forest', 'twilight', 'bridge'].includes(data.coverFallbackId)
-            ? data.coverFallbackId
-            : 'forest') as Story['coverFallbackId'],
+          coverFallbackId: normalizeBackdropId(data.coverFallbackId, 'forest'),
           readMinutes: Number(data.readMinutes ?? 2),
           isCustom: false,
           isPublished: true,
