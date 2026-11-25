@@ -78,7 +78,8 @@ interface WordSpan {
 }
 
 function buildWordSpans(text: string): { spans: WordSpan[]; paragraphCount: number } {
-  const paragraphs = text
+  const safeText = typeof text === 'string' ? text : String(text ?? '');
+  const paragraphs = safeText
     .trim()
     .split(/\n+/)
     .map((p) => p.trim())
@@ -589,27 +590,28 @@ export function StoryReader({
       setVoiceNotice(null);
       playDataUrlAudio(wavDataUrl);
     } catch (err) {
-      if (err instanceof TtsQuotaError || err instanceof TtsUnavailableError) {
-        // Seamlessly switch to built-in device voice and keep reading without interruption
+      const isQuota = err instanceof TtsQuotaError;
+      const isUnavailable = err instanceof TtsUnavailableError;
+
+      // Seamlessly fall back to built-in device voice on any AI voice failure so reading never breaks
+      if (isDeviceVoiceSupported()) {
         onUpdateVoicePreferences({
           ...voicePreferences,
           voiceEngine: 'device',
         });
         setVoiceNotice(
-          err instanceof TtsQuotaError
+          isQuota
             ? 'Daily AI voice limit reached on the free plan. Switched automatically to Built-in Device Voice for unlimited reading.'
-            : 'Expressive AI voice server is unavailable here. Switched automatically to Built-in Device Voice.'
+            : isUnavailable
+              ? 'Expressive AI voice is unavailable right now. Switched automatically to Built-in Device Voice.'
+              : 'AI voice hit a snag, so we switched automatically to Built-in Device Voice.'
         );
-        if (isDeviceVoiceSupported()) {
-          playDeviceVoiceNarration();
-        } else {
-          setAudioError(err.message);
-        }
+        playDeviceVoiceNarration();
       } else {
         setAudioError(
-          err instanceof Error
-            ? err.message
-            : 'AI voice narration is temporarily unavailable. You can switch to built-in device voice instead.'
+          isQuota
+            ? 'Daily AI voice limit reached on the free plan. Please try again later or record a parent voiceover.'
+            : 'AI voice narration is temporarily unavailable on this browser. You can record a parent voiceover instead.'
         );
       }
     } finally {

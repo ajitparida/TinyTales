@@ -130,17 +130,54 @@ export function clearAiTtsQuotaCooldown(): void {
 interface TtsApiPayload {
   audioBase64?: string;
   mimeType?: string;
-  error?: string;
-  code?: string;
-  retryAfterSeconds?: number;
+  error?: unknown;
+  message?: unknown;
+  code?: unknown;
+  retryAfterSeconds?: unknown;
+}
+
+function extractErrorText(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.message === 'string') return obj.message;
+    if (typeof obj.error === 'string') return obj.error;
+    if (obj.error && typeof obj.error === 'object') {
+      const nested = obj.error as Record<string, unknown>;
+      if (typeof nested.message === 'string') return nested.message;
+    }
+  }
+  return '';
+}
+
+function extractErrorCode(data: TtsApiPayload): string {
+  if (typeof data.code === 'string') return data.code;
+  if (data.error && typeof data.error === 'object') {
+    const nested = data.error as Record<string, unknown>;
+    if (typeof nested.code === 'string' || typeof nested.code === 'number') {
+      return String(nested.code);
+    }
+    if (typeof nested.status === 'string') {
+      return nested.status;
+    }
+  }
+  return '';
 }
 
 /**
  * Safely parses /api/tts/narrate responses so plain-text 404s (e.g. "The page could not be found"
- * on static deployments) or HTML proxy pages never surface raw JSON SyntaxError messages.
+ * on static deployments), HTML proxy pages, or non-standard JSON error objects never throw
+ * JSON SyntaxError or TypeError.
  */
 async function parseTtsApiResponse(res: Response): Promise<TtsApiPayload> {
-  const rawText = await res.text();
+  let rawText = '';
+  try {
+    const body = await res.text();
+    rawText = typeof body === 'string' ? body : '';
+  } catch {
+    rawText = '';
+  }
+
   const trimmed = rawText.trim();
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
   const looksNonJson =
@@ -151,7 +188,13 @@ async function parseTtsApiResponse(res: Response): Promise<TtsApiPayload> {
     !trimmed.startsWith('{');
 
   if (looksNonJson) {
-    if (res.status === 404 || res.status === 405 || res.status === 502 || res.status === 503 || res.status === 504) {
+    if (
+      res.status === 404 ||
+      res.status === 405 ||
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504
+    ) {
       markAiTtsEndpointUnavailable(300);
     }
     throw new TtsUnavailableError(
@@ -160,8 +203,16 @@ async function parseTtsApiResponse(res: Response): Promise<TtsApiPayload> {
   }
 
   try {
-    return JSON.parse(trimmed) as TtsApiPayload;
-  } catch {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      markAiTtsEndpointUnavailable(180);
+      throw new TtsUnavailableError(
+        'AI voice service returned an unexpected response. Switched automatically to Built-in Device Voice.'
+      );
+    }
+    return parsed as TtsApiPayload;
+  } catch (err) {
+    if (err instanceof TtsUnavailableError) throw err;
     markAiTtsEndpointUnavailable(180);
     throw new TtsUnavailableError(
       'AI voice service returned an unexpected response. Switched automatically to Built-in Device Voice.'
@@ -169,10 +220,18 @@ async function parseTtsApiResponse(res: Response): Promise<TtsApiPayload> {
   }
 }
 
-function sanitizeUserErrorMessage(raw: string | undefined, fallback: string): string {
-  if (!raw) return fallback;
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.startsWith('{') || trimmed.includes('"RESOURCE_EXHAUSTED"')) {
+function sanitizeUserErrorMessage(raw: unknown, fallback: string): string {
+  const extracted = extractErrorText(raw);
+  if (!extracted) return fallback;
+  const trimmed = extracted.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith('{') ||
+    trimmed.startsWith('<') ||
+    trimmed.includes('"RESOURCE_EXHAUSTED"') ||
+    trimmed.toLowerCase().includes('not valid json') ||
+    trimmed.toLowerCase().includes('is not a function')
+  ) {
     return fallback;
   }
   return trimmed.slice(0, 220);
@@ -385,7 +444,7 @@ export function speakWithDeviceVoice(params: {
     return () => {};
   }
 
-  const cleanText = params.text.trim();
+  const cleanText = typeof params.text === 'string' ? params.text.trim() : '';
   if (!cleanText) {
     params.onEnd?.();
     return () => {};
@@ -471,9 +530,11 @@ export function speakCharacterWithDeviceVoice(params: {
   readingSpeed: ReadingSpeed;
 }): void {
   if (!isDeviceVoiceSupported()) return;
+  const safeDialogue = typeof params.dialogue === 'string' ? params.dialogue.trim() : '';
+  if (!safeDialogue) return;
   window.speechSynthesis.cancel();
-  const utter = new SpeechSynthesisUtterance(params.dialogue);
-  const lower = params.characterName.toLowerCase();
+  const utter = new SpeechSynthesisUtterance(safeDialogue);
+  const lower = typeof params.characterName === 'string' ? params.characterName.toLowerCase() : '';
   const persona: VoicePersonaId =
     lower.includes('bear') || lower.includes('badger') || lower.includes('owl')
       ? 'fireside'
@@ -499,6 +560,11 @@ export async function fetchAiNarrationAudio(params: {
   mode: 'daytime' | 'bedtime';
   voicePersona: VoicePersonaId;
 }): Promise<string> {
+  const safeText = typeof params.text === 'string' ? params.text.trim() : '';
+  if (!safeText) {
+    throw new TtsUnavailableError('There is no text on this page to narrate.');
+  }
+
   const cacheKey = ttsCacheKey(params.storyId, params.pageId, params.mode, params.voicePersona);
   const cached = await getMediaDataUrl(cacheKey);
   if (cached) {
@@ -532,40 +598,66 @@ export async function fetchAiNarrationAudio(params: {
           Accept: 'application/json',
         },
         body: JSON.stringify({
-          text: params.text,
+          text: safeText,
           mode: params.mode,
           voicePersona: params.voicePersona,
         }),
       });
     } catch {
+      markAiTtsEndpointUnavailable(120);
       throw new TtsUnavailableError(
         'Could not reach the AI voice server. Switched automatically to Built-in Device Voice.'
       );
     }
 
     const data = await parseTtsApiResponse(res);
+    const errorCode = extractErrorCode(data).toUpperCase();
+    const retryAfter =
+      typeof data.retryAfterSeconds === 'number' && Number.isFinite(data.retryAfterSeconds)
+        ? data.retryAfterSeconds
+        : 3600;
 
-    if (res.status === 429 || data.code === 'QUOTA_EXCEEDED') {
-      markAiTtsQuotaExhausted(data.retryAfterSeconds ?? 3600);
+    if (
+      res.status === 429 ||
+      errorCode === 'QUOTA_EXCEEDED' ||
+      errorCode === 'RESOURCE_EXHAUSTED' ||
+      errorCode === '429'
+    ) {
+      markAiTtsQuotaExhausted(retryAfter);
       throw new TtsQuotaError(
         sanitizeUserErrorMessage(
-          data.error,
+          data.error ?? data.message,
           'Daily AI voice limit reached on the free plan. You can switch to the built-in device voice for unlimited instant narration.'
         ),
-        data.retryAfterSeconds ?? 3600
+        retryAfter
       );
     }
 
-    if (!res.ok || !data.audioBase64) {
+    if (
+      res.status === 404 ||
+      res.status === 405 ||
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504 ||
+      errorCode === 'NOT_FOUND'
+    ) {
+      markAiTtsEndpointUnavailable(300);
+      throw new TtsUnavailableError(
+        'AI voice server is unavailable right now. Switched automatically to Built-in Device Voice.'
+      );
+    }
+
+    if (!res.ok || typeof data.audioBase64 !== 'string' || !data.audioBase64) {
       throw new TtsUnavailableError(
         sanitizeUserErrorMessage(
-          data.error,
+          data.error ?? data.message,
           'AI voice narration is temporarily unavailable. Switched automatically to Built-in Device Voice.'
         )
       );
     }
 
-    const dataUrl = `data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`;
+    const mimeType = typeof data.mimeType === 'string' && data.mimeType ? data.mimeType : 'audio/wav';
+    const dataUrl = `data:${mimeType};base64,${data.audioBase64}`;
     await saveMediaDataUrl(cacheKey, dataUrl);
     return dataUrl;
   })();
@@ -648,17 +740,42 @@ export async function fetchCharacterVoiceAudio(params: {
     }
 
     const data = await parseTtsApiResponse(res);
+    const errorCode = extractErrorCode(data).toUpperCase();
+    const retryAfter =
+      typeof data.retryAfterSeconds === 'number' && Number.isFinite(data.retryAfterSeconds)
+        ? data.retryAfterSeconds
+        : 3600;
 
-    if (res.status === 429 || data.code === 'QUOTA_EXCEEDED') {
-      markAiTtsQuotaExhausted(data.retryAfterSeconds ?? 3600);
-      throw new TtsQuotaError('Daily AI voice limit reached.', data.retryAfterSeconds ?? 3600);
+    if (
+      res.status === 429 ||
+      errorCode === 'QUOTA_EXCEEDED' ||
+      errorCode === 'RESOURCE_EXHAUSTED' ||
+      errorCode === '429'
+    ) {
+      markAiTtsQuotaExhausted(retryAfter);
+      throw new TtsQuotaError('Daily AI voice limit reached.', retryAfter);
     }
-    if (!res.ok || !data.audioBase64) {
+    if (
+      res.status === 404 ||
+      res.status === 405 ||
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504 ||
+      errorCode === 'NOT_FOUND'
+    ) {
+      markAiTtsEndpointUnavailable(300);
+      throw new TtsUnavailableError('AI voice server is unavailable right now.');
+    }
+    if (!res.ok || typeof data.audioBase64 !== 'string' || !data.audioBase64) {
       throw new TtsUnavailableError(
-        sanitizeUserErrorMessage(data.error, 'Could not speak character line right now.')
+        sanitizeUserErrorMessage(
+          data.error ?? data.message,
+          'Could not speak character line right now.'
+        )
       );
     }
-    const dataUrl = `data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`;
+    const mimeType = typeof data.mimeType === 'string' && data.mimeType ? data.mimeType : 'audio/wav';
+    const dataUrl = `data:${mimeType};base64,${data.audioBase64}`;
     await saveMediaDataUrl(cacheKey, dataUrl);
     return dataUrl;
   })();
