@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowRight,
   BookHeart,
@@ -11,6 +12,7 @@ import {
   Pause,
   Pencil,
   Play,
+  RefreshCw,
   RotateCcw,
   SlidersHorizontal,
   Sparkles,
@@ -18,6 +20,7 @@ import {
   Star,
   Trash2,
   Volume2,
+  X,
 } from 'lucide-react';
 import {
   BedtimeSettings,
@@ -214,11 +217,38 @@ export function StoryReader({
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [aiVoiceToast, setAiVoiceToast] = useState<{
+    message: string;
+    hotspot?: CharacterHotspot;
+  } | null>(null);
   const [voiceSource, setVoiceSource] = useState<'ai' | 'parent'>('ai');
   const [hasParentRecording, setHasParentRecording] = useState(false);
   const [nextPagePreloaded, setNextPagePreloaded] = useState(false);
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const stopDeviceSpeechRef = useRef<(() => void) | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const dismissAiVoiceToast = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setAiVoiceToast(null);
+  }, []);
+
+  const showAiVoiceErrorToast = useCallback(
+    (message: string, hotspot?: CharacterHotspot) => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      setAiVoiceToast({ message, hotspot });
+      toastTimerRef.current = window.setTimeout(() => {
+        toastTimerRef.current = null;
+        setAiVoiceToast(null);
+      }, 7000);
+    },
+    []
+  );
 
   // Parent Voice Studio state
   const [showRecorder, setShowRecorder] = useState(false);
@@ -438,6 +468,7 @@ export function StoryReader({
       stopAudio(true);
       stopCharacterAudio();
       stopMicMonitorRef.current?.();
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
       if (recordTimerRef.current) window.clearInterval(recordTimerRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
@@ -562,73 +593,81 @@ export function StoryReader({
     voicePreferences.voicePersona,
   ]);
 
-  const playCurrentPageNarration = useCallback(async () => {
-    setAudioError(null);
+  const playCurrentPageNarration = useCallback(
+    async (options?: { forceAi?: boolean }) => {
+      setAudioError(null);
+      const forceAi = Boolean(options?.forceAi);
 
-    if (voiceSource === 'parent') {
-      const savedClip = await getMediaDataUrl(parentVoiceKey(story.id, currentPageKeyId));
-      if (savedClip) {
-        playDataUrlAudio(savedClip);
+      if (!forceAi && voiceSource === 'parent') {
+        const savedClip = await getMediaDataUrl(parentVoiceKey(story.id, currentPageKeyId));
+        if (savedClip) {
+          playDataUrlAudio(savedClip);
+          return;
+        }
+      }
+
+      if (!forceAi && voiceEngine === 'device') {
+        playDeviceVoiceNarration();
         return;
       }
-    }
 
-    if (voiceEngine === 'device') {
-      playDeviceVoiceNarration();
-      return;
-    }
-
-    setIsLoadingAudio(true);
-    try {
-      const wavDataUrl = await fetchAiNarrationAudio({
-        storyId: story.id,
-        pageId: currentPageKeyId,
-        text: currentNarrationText,
-        mode: effectiveMode,
-        voicePersona: voicePreferences.voicePersona,
-      });
-      setVoiceNotice(null);
-      playDataUrlAudio(wavDataUrl);
-    } catch (err) {
-      const isQuota = err instanceof TtsQuotaError;
-      const isUnavailable = err instanceof TtsUnavailableError;
-
-      // Seamlessly fall back to built-in device voice on any AI voice failure so reading never breaks
-      if (isDeviceVoiceSupported()) {
-        onUpdateVoicePreferences({
-          ...voicePreferences,
-          voiceEngine: 'device',
+      setIsLoadingAudio(true);
+      try {
+        const wavDataUrl = await fetchAiNarrationAudio({
+          storyId: story.id,
+          pageId: currentPageKeyId,
+          text: currentNarrationText,
+          mode: effectiveMode,
+          voicePersona: voicePreferences.voicePersona,
         });
-        setVoiceNotice(
-          isQuota
-            ? 'Daily AI voice limit reached on the free plan. Switched automatically to Built-in Device Voice for unlimited reading.'
+        setVoiceNotice(null);
+        dismissAiVoiceToast();
+        playDataUrlAudio(wavDataUrl);
+      } catch (err) {
+        const isQuota = err instanceof TtsQuotaError;
+        const isUnavailable = err instanceof TtsUnavailableError;
+
+        // Seamlessly fall back to built-in device voice on any AI voice failure so reading never breaks
+        if (isDeviceVoiceSupported()) {
+          const fallbackMessage = isQuota
+            ? 'Daily AI voice limit reached. Playing with Built-in Device Voice instead.'
             : isUnavailable
-              ? 'Expressive AI voice is unavailable right now. Switched automatically to Built-in Device Voice.'
-              : 'AI voice hit a snag, so we switched automatically to Built-in Device Voice.'
-        );
-        playDeviceVoiceNarration();
-      } else {
-        setAudioError(
-          isQuota
-            ? 'Daily AI voice limit reached on the free plan. Please try again later or record a parent voiceover.'
-            : 'AI voice narration is temporarily unavailable on this browser. You can record a parent voiceover instead.'
-        );
+              ? 'AI voice generation failed. Playing with Built-in Device Voice instead.'
+              : 'AI voice hit a snag. Playing with Built-in Device Voice instead.';
+
+          onUpdateVoicePreferences({
+            ...voicePreferences,
+            voiceEngine: 'device',
+          });
+          setVoiceNotice(fallbackMessage);
+          showAiVoiceErrorToast(fallbackMessage);
+          playDeviceVoiceNarration();
+        } else {
+          const errMessage = isQuota
+            ? 'Daily AI voice limit reached on the free plan. Retry later or record a parent voiceover.'
+            : 'AI voice generation failed on this browser. Tap Retry or record a parent voiceover.';
+          setAudioError(errMessage);
+          showAiVoiceErrorToast(errMessage);
+        }
+      } finally {
+        setIsLoadingAudio(false);
       }
-    } finally {
-      setIsLoadingAudio(false);
-    }
-  }, [
-    currentNarrationText,
-    currentPageKeyId,
-    effectiveMode,
-    onUpdateVoicePreferences,
-    playDataUrlAudio,
-    playDeviceVoiceNarration,
-    story.id,
-    voiceEngine,
-    voicePreferences,
-    voiceSource,
-  ]);
+    },
+    [
+      currentNarrationText,
+      currentPageKeyId,
+      dismissAiVoiceToast,
+      effectiveMode,
+      onUpdateVoicePreferences,
+      playDataUrlAudio,
+      playDeviceVoiceNarration,
+      showAiVoiceErrorToast,
+      story.id,
+      voiceEngine,
+      voicePreferences,
+      voiceSource,
+    ]
+  );
 
   // Hands-free Auto-Read continuation after automatic page turn
   useEffect(() => {
@@ -655,6 +694,7 @@ export function StoryReader({
   const handleSwitchToDeviceVoiceAndPlay = () => {
     stopAudio(true);
     setAudioError(null);
+    dismissAiVoiceToast();
     setVoiceSource('ai');
     onUpdateVoicePreferences({
       ...voicePreferences,
@@ -669,6 +709,7 @@ export function StoryReader({
     clearAiTtsQuotaCooldown();
     setAudioError(null);
     setVoiceNotice(null);
+    dismissAiVoiceToast();
     setVoiceSource('ai');
     onUpdateVoicePreferences({
       ...voicePreferences,
@@ -676,11 +717,37 @@ export function StoryReader({
     });
   };
 
-  const speakCharacterHotspot = async (hotspot: CharacterHotspot) => {
+  const handleRetryAiVoice = useCallback(() => {
+    if (isLoadingAudio) return;
+    stopAudio(true);
+    clearAiTtsQuotaCooldown();
+    setAudioError(null);
+    setVoiceNotice(null);
+    dismissAiVoiceToast();
+    setVoiceSource('ai');
+    onUpdateVoicePreferences({
+      ...voicePreferences,
+      voiceEngine: 'ai',
+    });
+    void playCurrentPageNarration({ forceAi: true });
+  }, [
+    dismissAiVoiceToast,
+    isLoadingAudio,
+    onUpdateVoicePreferences,
+    playCurrentPageNarration,
+    stopAudio,
+    voicePreferences,
+  ]);
+
+  const speakCharacterHotspot = async (
+    hotspot: CharacterHotspot,
+    options?: { forceAi?: boolean }
+  ) => {
     stopAudio(true);
     stopCharacterAudio();
+    const forceAi = Boolean(options?.forceAi);
 
-    if (voiceEngine === 'device') {
+    if (!forceAi && voiceEngine === 'device') {
       speakCharacterWithDeviceVoice({
         characterName: hotspot.name,
         dialogue: hotspot.dialogue,
@@ -697,6 +764,7 @@ export function StoryReader({
         characterName: hotspot.name,
         dialogue: hotspot.dialogue,
       });
+      dismissAiVoiceToast();
       const charAudio = new Audio(wavUrl);
       charAudio.playbackRate = voicePreferences.readingSpeed;
       characterAudioRef.current = charAudio;
@@ -707,7 +775,11 @@ export function StoryReader({
       };
       await charAudio.play();
     } catch {
-      // Seamlessly speak the character line via built-in device voice if AI TTS quota is reached
+      showAiVoiceErrorToast(
+        `AI character voice for ${hotspot.name} failed. Playing with Built-in Device Voice.`,
+        hotspot
+      );
+      // Seamlessly speak the character line via built-in device voice if AI TTS fails
       speakCharacterWithDeviceVoice({
         characterName: hotspot.name,
         dialogue: hotspot.dialogue,
@@ -1513,20 +1585,32 @@ export function StoryReader({
                   )}
 
                   {voiceNotice && !audioError && (
-                    <div className="mt-3 p-3 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/30 dark:border-[#E5A94C]/30 text-xs text-[#6E450A] dark:text-[#F4D39B] space-y-2">
-                      <p className="leading-relaxed">{voiceNotice}</p>
-                      <div className="flex flex-wrap items-center gap-3">
+                    <div
+                      role="status"
+                      className="mt-3 p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] space-y-2.5"
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#D98A1C] dark:text-[#E5A94C]" />
+                        <p className="leading-relaxed">{voiceNotice}</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2.5 pl-6">
                         <button
                           type="button"
-                          onClick={handleSwitchBackToAiVoice}
-                          className="font-semibold underline cursor-pointer"
+                          disabled={isLoadingAudio}
+                          onClick={handleRetryAiVoice}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                         >
-                          Try AI Voice Again
+                          {isLoadingAudio ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                          {isLoadingAudio ? 'Retrying...' : 'Retry AI Voice'}
                         </button>
                         <button
                           type="button"
                           onClick={() => setVoiceNotice(null)}
-                          className="opacity-80 hover:opacity-100 cursor-pointer"
+                          className="px-2 py-1 font-medium opacity-80 hover:opacity-100 cursor-pointer"
                         >
                           Dismiss
                         </button>
@@ -1535,15 +1619,36 @@ export function StoryReader({
                   )}
 
                   {audioError && (
-                    <div className="mt-3 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/30 text-xs text-[#9C2F3B] dark:text-[#F299A3] space-y-2.5">
-                      <p className="leading-relaxed">{audioError}</p>
-                      <button
-                        type="button"
-                        onClick={handleSwitchToDeviceVoiceAndPlay}
-                        className="w-full py-2 px-3 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors cursor-pointer"
-                      >
-                        Switch to Built-in Device Voice & Play
-                      </button>
+                    <div
+                      role="alert"
+                      className="mt-3 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] space-y-2.5"
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#C84B58] dark:text-[#F299A3]" />
+                        <p className="leading-relaxed">{audioError}</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={isLoadingAudio}
+                          onClick={handleRetryAiVoice}
+                          className="inline-flex items-center justify-center gap-1.5 flex-1 py-2 px-3 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] hover:bg-white dark:hover:bg-[#232B42] text-[#9C2F3B] dark:text-[#F299A3] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                        >
+                          {isLoadingAudio ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                          {isLoadingAudio ? 'Retrying...' : 'Retry'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSwitchToDeviceVoiceAndPlay}
+                          className="flex-1 py-2 px-3 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          Use Device Voice
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1688,33 +1793,143 @@ export function StoryReader({
                 </div>
 
                 {voiceNotice && !audioError && (
-                  <div className="mt-4 p-3 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/30 dark:border-[#E5A94C]/30 text-xs text-[#6E450A] dark:text-[#F4D39B] flex flex-wrap items-center justify-between gap-2">
-                    <span>{voiceNotice}</span>
-                    <button
-                      type="button"
-                      onClick={() => setVoiceNotice(null)}
-                      className="font-semibold underline cursor-pointer"
-                    >
-                      Dismiss
-                    </button>
+                  <div
+                    role="status"
+                    className="mt-4 p-3.5 rounded-xl bg-[#D98A1C]/10 dark:bg-[#E5A94C]/12 border border-[#D98A1C]/35 dark:border-[#E5A94C]/35 text-xs text-[#6E450A] dark:text-[#F4D39B] flex flex-wrap items-center justify-between gap-2.5"
+                  >
+                    <div className="flex items-start gap-2 min-w-0 flex-1">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#D98A1C] dark:text-[#E5A94C]" />
+                      <span>{voiceNotice}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isLoadingAudio}
+                        onClick={handleRetryAiVoice}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {isLoadingAudio ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        {isLoadingAudio ? 'Retrying...' : 'Retry'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setVoiceNotice(null)}
+                        className="font-semibold underline cursor-pointer"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
                   </div>
                 )}
 
                 {audioError && (
-                  <div className="mt-4 p-3 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/30 text-xs text-[#9C2F3B] dark:text-[#F299A3] flex flex-wrap items-center justify-between gap-3">
-                    <span>{audioError}</span>
-                    <button
-                      type="button"
-                      onClick={handleSwitchToDeviceVoiceAndPlay}
-                      className="px-3 py-1.5 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] font-semibold cursor-pointer"
-                    >
-                      Use Built-in Device Voice
-                    </button>
+                  <div
+                    role="alert"
+                    className="mt-4 p-3.5 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/35 text-xs text-[#9C2F3B] dark:text-[#F299A3] flex flex-wrap items-center justify-between gap-3"
+                  >
+                    <div className="flex items-start gap-2 min-w-0 flex-1">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-[#C84B58] dark:text-[#F299A3]" />
+                      <span>{audioError}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isLoadingAudio}
+                        onClick={handleRetryAiVoice}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#C84B58]/40 bg-white/80 dark:bg-[#1A2033] text-[#9C2F3B] dark:text-[#F299A3] font-semibold disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {isLoadingAudio ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        {isLoadingAudio ? 'Retrying...' : 'Retry'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSwitchToDeviceVoiceAndPlay}
+                        className="px-3 py-1.5 rounded-lg bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624] font-semibold cursor-pointer"
+                      >
+                        Use Device Voice
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
           </motion.section>
+        )}
+      </AnimatePresence>
+
+      {/* AI Voice Error Toast Notification with Quick Retry */}
+      <AnimatePresence>
+        {aiVoiceToast && (
+          <motion.div
+            role="alert"
+            aria-live="polite"
+            initial={reduced ? { opacity: 1 } : { opacity: 0, y: 14, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={reduced ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ duration: 0.2 }}
+            className="fixed bottom-5 right-5 z-50 max-w-sm w-[calc(100vw-2.5rem)] rounded-2xl bg-white dark:bg-[#1A2033] border border-[#D98A1C]/45 dark:border-[#E5A94C]/45 shadow-xl p-4"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-xl bg-[#D98A1C]/12 dark:bg-[#E5A94C]/15 text-[#D98A1C] dark:text-[#E5A94C] flex items-center justify-center shrink-0">
+                <AlertCircle className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+                  AI Voice Notice
+                </div>
+                <p className="text-xs text-[#5C646B] dark:text-[#A4AEC2] mt-0.5 leading-relaxed">
+                  {aiVoiceToast.message}
+                </p>
+                <div className="mt-2.5 flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isLoadingAudio || characterVoiceLoading}
+                    onClick={() => {
+                      const targetHotspot = aiVoiceToast.hotspot;
+                      if (targetHotspot) {
+                        clearAiTtsQuotaCooldown();
+                        dismissAiVoiceToast();
+                        void speakCharacterHotspot(targetHotspot, { forceAi: true });
+                      } else {
+                        handleRetryAiVoice();
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {isLoadingAudio || characterVoiceLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    {isLoadingAudio || characterVoiceLoading ? 'Retrying...' : 'Retry'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissAiVoiceToast}
+                    className="px-2 py-1 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={dismissAiVoiceToast}
+                aria-label="Close voice notification"
+                className="p-1 rounded-lg text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
