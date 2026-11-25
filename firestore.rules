@@ -21,9 +21,9 @@ service cloud.firestore {
 
     function isAdmin() {
       return isVerifiedUser() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
         request.auth.token.email == 'ajit.parida01@gmail.com' ||
-        request.auth.token.email == 'ajitparida01@gmail.com'
+        request.auth.token.email == 'ajitparida01@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
@@ -313,7 +313,6 @@ service cloud.firestore {
           'updatedAt'
         ])
         && isValidId(data.publishedBy)
-        && data.publishedBy == request.auth.uid
         && data.status is string
         && data.status == 'published'
         && data.title is string
@@ -365,7 +364,6 @@ service cloud.firestore {
           'updatedAt'
         ])
         && isValidId(data.publishedBy)
-        && data.publishedBy == request.auth.uid
         && isValidId(data.storyId)
         && data.dataUrl is string
         && data.dataUrl.size() >= 20
@@ -386,11 +384,12 @@ service cloud.firestore {
 
     // Public Main-Site Published Storybooks (Admin Write, Public Read)
     match /publishedStories/{storyId} {
-      allow get: if isValidId(storyId) && resource.data.status == 'published';
-      allow list: if resource.data.status == 'published';
+      allow get: if isValidId(storyId) && (isAdmin() || (resource != null && resource.data.status == 'published'));
+      allow list: if isAdmin() || resource.data.status == 'published';
       allow create: if isAdmin()
         && isValidId(storyId)
         && isValidPublishedStory(incoming())
+        && incoming().publishedBy == request.auth.uid
         && incoming().publishedAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isAdmin()
@@ -422,6 +421,7 @@ service cloud.firestore {
       allow create: if isAdmin()
         && isValidId(mediaId)
         && isValidPublishedMedia(incoming())
+        && incoming().publishedBy == request.auth.uid
         && incoming().publishedAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isAdmin()
