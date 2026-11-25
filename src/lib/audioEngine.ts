@@ -57,7 +57,17 @@ export class TtsQuotaError extends Error {
   }
 }
 
+export class TtsUnavailableError extends Error {
+  readonly code = 'TTS_UNAVAILABLE';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'TtsUnavailableError';
+  }
+}
+
 const QUOTA_COOLDOWN_KEY = 'meadowtale_ai_tts_quota_until_v1';
+const UNAVAIL_COOLDOWN_KEY = 'meadowtale_ai_tts_unavail_until_v1';
 
 export function isAiTtsQuotaCoolingDown(): boolean {
   try {
@@ -75,6 +85,30 @@ export function isAiTtsQuotaCoolingDown(): boolean {
   }
 }
 
+export function isAiTtsEndpointCoolingDown(): boolean {
+  try {
+    const raw = sessionStorage.getItem(UNAVAIL_COOLDOWN_KEY);
+    if (!raw) return false;
+    const until = Number(raw);
+    if (!Number.isFinite(until)) return false;
+    if (Date.now() >= until) {
+      sessionStorage.removeItem(UNAVAIL_COOLDOWN_KEY);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function markAiTtsEndpointUnavailable(seconds = 300): void {
+  try {
+    sessionStorage.setItem(UNAVAIL_COOLDOWN_KEY, String(Date.now() + seconds * 1000));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function markAiTtsQuotaExhausted(retryAfterSeconds = 3600): void {
   try {
     const clampedSeconds = Math.max(60, Math.min(86400, retryAfterSeconds));
@@ -87,8 +121,51 @@ export function markAiTtsQuotaExhausted(retryAfterSeconds = 3600): void {
 export function clearAiTtsQuotaCooldown(): void {
   try {
     localStorage.removeItem(QUOTA_COOLDOWN_KEY);
+    sessionStorage.removeItem(UNAVAIL_COOLDOWN_KEY);
   } catch {
     // Ignore storage errors
+  }
+}
+
+interface TtsApiPayload {
+  audioBase64?: string;
+  mimeType?: string;
+  error?: string;
+  code?: string;
+  retryAfterSeconds?: number;
+}
+
+/**
+ * Safely parses /api/tts/narrate responses so plain-text 404s (e.g. "The page could not be found"
+ * on static deployments) or HTML proxy pages never surface raw JSON SyntaxError messages.
+ */
+async function parseTtsApiResponse(res: Response): Promise<TtsApiPayload> {
+  const rawText = await res.text();
+  const trimmed = rawText.trim();
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const looksNonJson =
+    !trimmed ||
+    contentType.includes('text/html') ||
+    contentType.includes('text/plain') ||
+    trimmed.startsWith('<') ||
+    !trimmed.startsWith('{');
+
+  if (looksNonJson) {
+    if (res.status === 404 || res.status === 405 || res.status === 502 || res.status === 503 || res.status === 504) {
+      markAiTtsEndpointUnavailable(300);
+    }
+    throw new TtsUnavailableError(
+      'AI voice server is unavailable right now. Switched automatically to Built-in Device Voice so storytime continues smoothly.'
+    );
+  }
+
+  try {
+    return JSON.parse(trimmed) as TtsApiPayload;
+  } catch {
+    markAiTtsEndpointUnavailable(180);
+    throw new TtsUnavailableError(
+      'AI voice service returned an unexpected response. Switched automatically to Built-in Device Voice.'
+    );
   }
 }
 
@@ -434,29 +511,39 @@ export async function fetchAiNarrationAudio(params: {
     );
   }
 
+  if (isAiTtsEndpointCoolingDown()) {
+    throw new TtsUnavailableError(
+      'AI voice server is unavailable right now. Switched automatically to Built-in Device Voice.'
+    );
+  }
+
   const existing = inflightRequests.get(cacheKey);
   if (existing) {
     return existing;
   }
 
   const reqPromise = (async () => {
-    const res = await fetch('/api/tts/narrate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: params.text,
-        mode: params.mode,
-        voicePersona: params.voicePersona,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch('/api/tts/narrate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          text: params.text,
+          mode: params.mode,
+          voicePersona: params.voicePersona,
+        }),
+      });
+    } catch {
+      throw new TtsUnavailableError(
+        'Could not reach the AI voice server. Switched automatically to Built-in Device Voice.'
+      );
+    }
 
-    const data = (await res.json()) as {
-      audioBase64?: string;
-      mimeType?: string;
-      error?: string;
-      code?: string;
-      retryAfterSeconds?: number;
-    };
+    const data = await parseTtsApiResponse(res);
 
     if (res.status === 429 || data.code === 'QUOTA_EXCEEDED') {
       markAiTtsQuotaExhausted(data.retryAfterSeconds ?? 3600);
@@ -470,10 +557,10 @@ export async function fetchAiNarrationAudio(params: {
     }
 
     if (!res.ok || !data.audioBase64) {
-      throw new Error(
+      throw new TtsUnavailableError(
         sanitizeUserErrorMessage(
           data.error,
-          'AI voice narration is temporarily unavailable. You can use the built-in device voice instead.'
+          'AI voice narration is temporarily unavailable. Switched automatically to Built-in Device Voice.'
         )
       );
     }
@@ -502,7 +589,7 @@ export async function preloadAiNarrationAudio(params: {
   mode: 'daytime' | 'bedtime';
   voicePersona: VoicePersonaId;
 }): Promise<boolean> {
-  if (isAiTtsQuotaCoolingDown()) {
+  if (isAiTtsQuotaCoolingDown() || isAiTtsEndpointCoolingDown()) {
     return false;
   }
   try {
@@ -532,34 +619,42 @@ export async function fetchCharacterVoiceAudio(params: {
     throw new TtsQuotaError('Daily AI voice limit reached.');
   }
 
+  if (isAiTtsEndpointCoolingDown()) {
+    throw new TtsUnavailableError('AI voice server is unavailable right now.');
+  }
+
   const existing = inflightRequests.get(cacheKey);
   if (existing) {
     return existing;
   }
 
   const reqPromise = (async () => {
-    const res = await fetch('/api/tts/narrate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: params.dialogue,
-        mode: 'character',
-        characterName: params.characterName,
-      }),
-    });
-    const data = (await res.json()) as {
-      audioBase64?: string;
-      mimeType?: string;
-      error?: string;
-      code?: string;
-      retryAfterSeconds?: number;
-    };
+    let res: Response;
+    try {
+      res = await fetch('/api/tts/narrate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          text: params.dialogue,
+          mode: 'character',
+          characterName: params.characterName,
+        }),
+      });
+    } catch {
+      throw new TtsUnavailableError('Could not reach the AI voice server.');
+    }
+
+    const data = await parseTtsApiResponse(res);
+
     if (res.status === 429 || data.code === 'QUOTA_EXCEEDED') {
       markAiTtsQuotaExhausted(data.retryAfterSeconds ?? 3600);
       throw new TtsQuotaError('Daily AI voice limit reached.', data.retryAfterSeconds ?? 3600);
     }
     if (!res.ok || !data.audioBase64) {
-      throw new Error(
+      throw new TtsUnavailableError(
         sanitizeUserErrorMessage(data.error, 'Could not speak character line right now.')
       );
     }

@@ -39,6 +39,7 @@ import {
   speakWithDeviceVoice,
   stopDeviceVoice,
   TtsQuotaError,
+  TtsUnavailableError,
   VOICE_PERSONAS,
 } from '../lib/audioEngine';
 import {
@@ -46,7 +47,9 @@ import {
   deleteMediaKey,
   getMediaDataUrl,
   parentVoiceKey,
+  resolveStoryMediaUrl,
   saveMediaDataUrl,
+  saveStoryMedia,
 } from '../lib/mediaStore';
 import {
   CLEAR_MIC_CONSTRAINTS,
@@ -58,6 +61,7 @@ import { PageImageFramingModal } from './PageImageFramingModal';
 
 interface StoryReaderProps {
   story: Story;
+  cloudSyncKey?: string;
   bedtimeSettings: BedtimeSettings;
   voicePreferences: VoicePreferences;
   onUpdateVoicePreferences: (next: VoicePreferences) => void;
@@ -178,6 +182,7 @@ const SPEED_OPTIONS: { value: ReadingSpeed; label: string }[] = [
 
 export function StoryReader({
   story,
+  cloudSyncKey = '',
   bedtimeSettings,
   voicePreferences,
   onUpdateVoicePreferences,
@@ -320,8 +325,9 @@ export function StoryReader({
     if (isMoralSpread) {
       const fallback =
         story.coverImageUrl || BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest;
-      if (story.coverMediaId) {
-        void getMediaDataUrl(story.coverMediaId).then((url) => {
+      const coverKey = story.coverMediaId || story.pages[0]?.mediaId;
+      if (coverKey) {
+        void resolveStoryMediaUrl(coverKey, { preferPublished: story.isPublished }).then((url) => {
           if (active) setResolvedPageImage(url || fallback);
         });
       } else {
@@ -339,9 +345,11 @@ export function StoryReader({
       const fallback =
         BACKDROP_ART_MAP[currentPage.fallbackArtId || story.coverFallbackId] ||
         BACKDROP_ART_MAP.forest;
-      void getMediaDataUrl(currentPage.mediaId).then((url) => {
-        if (active) setResolvedPageImage(url || fallback);
-      });
+      void resolveStoryMediaUrl(currentPage.mediaId, { preferPublished: story.isPublished }).then(
+        (url) => {
+          if (active) setResolvedPageImage(url || fallback);
+        }
+      );
     } else {
       setResolvedPageImage(
         BACKDROP_ART_MAP[currentPage.fallbackArtId || story.coverFallbackId] ||
@@ -352,7 +360,7 @@ export function StoryReader({
     return () => {
       active = false;
     };
-  }, [pageIndex, isMoralSpread, currentPage, story, stopAudio, stopCharacterAudio]);
+  }, [pageIndex, isMoralSpread, currentPage, story, cloudSyncKey, stopAudio, stopCharacterAudio]);
 
   // Check if parent has recorded a voice clip for the current page
   useEffect(() => {
@@ -581,14 +589,16 @@ export function StoryReader({
       setVoiceNotice(null);
       playDataUrlAudio(wavDataUrl);
     } catch (err) {
-      if (err instanceof TtsQuotaError) {
+      if (err instanceof TtsQuotaError || err instanceof TtsUnavailableError) {
         // Seamlessly switch to built-in device voice and keep reading without interruption
         onUpdateVoicePreferences({
           ...voicePreferences,
           voiceEngine: 'device',
         });
         setVoiceNotice(
-          'Daily AI voice limit reached on the free plan. Switched automatically to Built-in Device Voice for unlimited reading.'
+          err instanceof TtsQuotaError
+            ? 'Daily AI voice limit reached on the free plan. Switched automatically to Built-in Device Voice for unlimited reading.'
+            : 'Expressive AI voice server is unavailable here. Switched automatically to Built-in Device Voice.'
         );
         if (isDeviceVoiceSupported()) {
           playDeviceVoiceNarration();
@@ -1712,7 +1722,7 @@ export function StoryReader({
           pageLabel={`Page ${pageIndex + 1}`}
           onCancel={() => setShowImageResizer(false)}
           onApply={(framedUrl) => {
-            void saveMediaDataUrl(currentPage.mediaId!, framedUrl).then(() => {
+            void saveStoryMedia(story.id, currentPage.mediaId!, framedUrl).then(() => {
               setResolvedPageImage(framedUrl);
               setShowImageResizer(false);
             });

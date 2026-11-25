@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Camera, Moon, PenLine, Search, Sparkles, Star, X } from 'lucide-react';
 import { AgeGroup, BedtimeSettings, ChildProfile, ReadingLogEntry, Story } from '../types/story';
 import { BACKDROP_ART_MAP } from '../data/curatedStories';
-import { getMediaDataUrl } from '../lib/mediaStore';
+import { resolveStoryMediaUrl } from '../lib/mediaStore';
 import { StoryCard } from './StoryCard';
 
 type LibraryFilter = 'all' | AgeGroup | 'scanned';
@@ -10,6 +10,9 @@ type LibraryFilter = 'all' | AgeGroup | 'scanned';
 interface LibraryViewProps {
   curatedStories: Story[];
   customStories: Story[];
+  cloudSyncKey?: string;
+  isAdmin?: boolean;
+  publishedStoryIds?: Set<string>;
   childrenProfiles: ChildProfile[];
   activeChildId: string;
   readingLogs: ReadingLogEntry[];
@@ -22,11 +25,16 @@ interface LibraryViewProps {
   onOpenManualCreator: () => void;
   onEditCustomStory: (story: Story) => void;
   onDeleteCustomStory: (story: Story) => void | Promise<void>;
+  onPublishCustomStory?: (story: Story) => void | Promise<void>;
+  onUnpublishCustomStory?: (story: Story) => void | Promise<void>;
 }
 
 export function LibraryView({
   curatedStories,
   customStories,
+  cloudSyncKey = '',
+  isAdmin = false,
+  publishedStoryIds,
   childrenProfiles,
   activeChildId,
   readingLogs,
@@ -39,6 +47,8 @@ export function LibraryView({
   onOpenManualCreator,
   onEditCustomStory,
   onDeleteCustomStory,
+  onPublishCustomStory,
+  onUnpublishCustomStory,
 }: LibraryViewProps) {
   const activeChild =
     childrenProfiles.find((c) => c.id === activeChildId) || childrenProfiles[0];
@@ -117,8 +127,11 @@ export function LibraryView({
     }
 
     const mediaKey = featuredStory.coverMediaId || featuredStory.pages[0]?.mediaId;
+    const isFeaturedPublished = Boolean(
+      featuredStory.isPublished || publishedStoryIds?.has(featuredStory.id)
+    );
     if (mediaKey) {
-      void getMediaDataUrl(mediaKey).then((url) => {
+      void resolveStoryMediaUrl(mediaKey, { preferPublished: isFeaturedPublished }).then((url) => {
         if (!active) return;
         setFeaturedCoverUrl(url || fallback);
         setFeaturedImageError(false);
@@ -137,6 +150,9 @@ export function LibraryView({
     featuredStory.coverMediaId,
     featuredStory.coverFallbackId,
     featuredStory.pages,
+    featuredStory.isPublished,
+    publishedStoryIds,
+    cloudSyncKey,
   ]);
 
   const formatTimer = (sec: number) => {
@@ -412,16 +428,28 @@ export function LibraryView({
           )
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {filteredStories.map((story) => (
-              <StoryCard
-                key={story.id}
-                story={story}
-                isCompleted={completedStoryIds.has(story.id)}
-                onSelect={onOpenStory}
-                onEditCustom={story.isCustom ? onEditCustomStory : undefined}
-                onDeleteCustom={story.isCustom ? onDeleteCustomStory : undefined}
-              />
-            ))}
+            {filteredStories.map((story) => {
+              const storyIsPublished = Boolean(
+                story.isPublished || publishedStoryIds?.has(story.id)
+              );
+              return (
+                <StoryCard
+                  key={story.id}
+                  story={story}
+                  cloudSyncKey={cloudSyncKey}
+                  isCompleted={completedStoryIds.has(story.id)}
+                  isAdmin={isAdmin}
+                  isPublished={storyIsPublished}
+                  onSelect={onOpenStory}
+                  onEditCustom={story.isCustom ? onEditCustomStory : undefined}
+                  onDeleteCustom={story.isCustom ? onDeleteCustomStory : undefined}
+                  onPublishCustom={isAdmin && story.isCustom ? onPublishCustomStory : undefined}
+                  onUnpublishCustom={
+                    isAdmin && storyIsPublished ? onUnpublishCustomStory : undefined
+                  }
+                />
+              );
+            })}
           </div>
         )}
       </section>

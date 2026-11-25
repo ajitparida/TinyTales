@@ -1,54 +1,76 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { BookOpen, EyeOff, Globe, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { Story } from '../types/story';
 import { BACKDROP_ART_MAP } from '../data/curatedStories';
-import { getMediaDataUrl } from '../lib/mediaStore';
+import { resolveStoryMediaUrl } from '../lib/mediaStore';
 
 interface StoryCardProps {
   story: Story;
+  cloudSyncKey?: string;
   isCompleted?: boolean;
+  isAdmin?: boolean;
+  isPublished?: boolean;
   onSelect: (story: Story) => void;
   onEditCustom?: (story: Story) => void;
   onDeleteCustom?: (story: Story) => void | Promise<void>;
+  onPublishCustom?: (story: Story) => void | Promise<void>;
+  onUnpublishCustom?: (story: Story) => void | Promise<void>;
 }
 
 export function StoryCard({
   story,
+  cloudSyncKey = '',
   isCompleted = false,
+  isAdmin = false,
+  isPublished = false,
   onSelect,
   onEditCustom,
   onDeleteCustom,
+  onPublishCustom,
+  onUnpublishCustom,
 }: StoryCardProps) {
   const [resolvedCover, setResolvedCover] = useState<string>(
     story.coverImageUrl || BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest
   );
   const [imageError, setImageError] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isPublishingAction, setIsPublishingAction] = useState(false);
+
+  const effectivePublished = Boolean(isPublished || story.isPublished);
+  const mediaKey = story.coverMediaId || story.pages[0]?.mediaId || '';
 
   useEffect(() => {
     let active = true;
+    const fallback =
+      story.coverImageUrl || BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest;
+
     if (story.coverImageUrl) {
       setResolvedCover(story.coverImageUrl);
       setImageError(false);
       return;
     }
-    if (story.coverMediaId) {
-      void getMediaDataUrl(story.coverMediaId).then((url) => {
+    if (mediaKey) {
+      void resolveStoryMediaUrl(mediaKey, { preferPublished: effectivePublished }).then((url) => {
         if (!active) return;
         if (url) {
           setResolvedCover(url);
           setImageError(false);
         } else {
-          setResolvedCover(BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest);
+          setResolvedCover(fallback);
         }
       });
     } else {
-      setResolvedCover(BACKDROP_ART_MAP[story.coverFallbackId] || BACKDROP_ART_MAP.forest);
+      setResolvedCover(fallback);
     }
     return () => {
       active = false;
     };
-  }, [story.coverImageUrl, story.coverMediaId, story.coverFallbackId]);
+  }, [story.coverImageUrl, mediaKey, story.coverFallbackId, cloudSyncKey, effectivePublished]);
+
+  const showCustomFooter = Boolean(story.isCustom && (onEditCustom || onDeleteCustom));
+  const showAdminPublishFooter = Boolean(
+    isAdmin && ((story.isCustom && !effectivePublished && onPublishCustom) || (effectivePublished && onUnpublishCustom))
+  );
 
   return (
     <article className="group flex flex-col bg-white dark:bg-[#1A2033] border border-[#E6E1D8] dark:border-[#2A324B] rounded-2xl overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
@@ -83,12 +105,17 @@ export function StoryCard({
             <span className="tabular-nums">{story.readMinutes} min</span>
             <span aria-hidden="true">·</span>
             <span>Moral: {story.moralTitle}</span>
-            {story.isCustom && (
+            {effectivePublished ? (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="text-[#2F7A5E] dark:text-[#E5A94C]">Scanned Book</span>
+                <span className="text-[#2F7A5E] dark:text-[#E5A94C]">Main Site</span>
               </>
-            )}
+            ) : story.isCustom ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="text-[#2F7A5E] dark:text-[#E5A94C]">My Book</span>
+              </>
+            ) : null}
           </div>
 
           <h3 className="font-display text-xl font-semibold text-[#24292E] dark:text-[#EDE9DF] leading-snug mb-2 group-hover:text-[#2F7A5E] dark:group-hover:text-[#E5A94C] transition-colors">
@@ -110,50 +137,107 @@ export function StoryCard({
         </div>
       </button>
 
-      {story.isCustom && (onEditCustom || onDeleteCustom) && (
-        <div className="px-5 pb-4 -mt-1 flex items-center justify-between gap-3">
-          {onEditCustom ? (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onEditCustom(story);
-              }}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline transition-colors cursor-pointer"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              Edit Book
-            </button>
-          ) : (
-            <span />
+      {(showCustomFooter || showAdminPublishFooter) && (
+        <div className="px-5 pb-4 -mt-1 space-y-2.5">
+          {showCustomFooter && (
+            <div className="flex items-center justify-between gap-3">
+              {onEditCustom ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEditCustom(story);
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] hover:underline transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  Edit Book
+                </button>
+              ) : (
+                <span />
+              )}
+
+              {onDeleteCustom && (
+                <button
+                  type="button"
+                  disabled={isDeleting || isPublishingAction}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (isDeleting) return;
+                    setIsDeleting(true);
+                    try {
+                      await onDeleteCustom(story);
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isDeleting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                  {isDeleting ? 'Removing...' : 'Remove'}
+                </button>
+              )}
+            </div>
           )}
 
-          {onDeleteCustom && (
-            <button
-              type="button"
-              disabled={isDeleting}
-              onClick={async (e) => {
-                e.stopPropagation();
-                if (isDeleting) return;
-                setIsDeleting(true);
-                try {
-                  await onDeleteCustom(story);
-                } finally {
-                  setIsDeleting(false);
-                }
-              }}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {isDeleting ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Trash2 className="w-3.5 h-3.5" />
-              )}
-              {isDeleting ? 'Removing...' : 'Remove'}
-            </button>
+          {showAdminPublishFooter && (
+            <div className="pt-2 border-t border-[#E6E1D8]/70 dark:border-[#2A324B] flex items-center justify-between gap-2">
+              {effectivePublished && onUnpublishCustom ? (
+                <button
+                  type="button"
+                  disabled={isPublishingAction || isDeleting}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (isPublishingAction) return;
+                    setIsPublishingAction(true);
+                    try {
+                      await onUnpublishCustom(story);
+                    } finally {
+                      setIsPublishingAction(false);
+                    }
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#D8D1C4] dark:border-[#34405E] text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#C84B58] dark:hover:text-[#E06D7A] hover:border-[#C84B58]/40 transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isPublishingAction ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  )}
+                  {isPublishingAction ? 'Unpublishing...' : 'Unpublish from Main Site'}
+                </button>
+              ) : onPublishCustom ? (
+                <button
+                  type="button"
+                  disabled={isPublishingAction || isDeleting}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (isPublishingAction) return;
+                    setIsPublishingAction(true);
+                    try {
+                      await onPublishCustom(story);
+                    } finally {
+                      setIsPublishingAction(false);
+                    }
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2F7A5E]/10 hover:bg-[#2F7A5E]/18 dark:bg-[#E5A94C]/15 dark:hover:bg-[#E5A94C]/25 text-xs font-semibold text-[#2F7A5E] dark:text-[#E5A94C] transition-colors disabled:opacity-55 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isPublishingAction ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Globe className="w-3.5 h-3.5" />
+                  )}
+                  {isPublishingAction ? 'Publishing to Site...' : 'Publish to Main Site'}
+                </button>
+              ) : null}
+            </div>
           )}
         </div>
       )}
     </article>
   );
 }
+

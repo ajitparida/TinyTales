@@ -9,7 +9,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -631,13 +631,36 @@ async function startServer() {
     }
   );
 
+  let viteServer: { middlewares: express.RequestHandler; close: () => Promise<void> } | null = null;
+
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    const viteReady = import('vite')
+      .then(({ createServer: createViteServer }) =>
+        createViteServer({
+          server: { middlewareMode: true, hmr: false },
+          appType: 'spa',
+        })
+      )
+      .then((vite) => {
+        viteServer = vite;
+        return vite;
+      });
+
+    app.use((req, res, next) => {
+      if (viteServer) {
+        viteServer.middlewares(req, res, next);
+        return;
+      }
+      viteReady
+        .then((vite) => vite.middlewares(req, res, next))
+        .catch(next);
     });
-    app.use(vite.middlewares);
+
+    // Warm up Vite middleware immediately in the background while port 3000 is already listening
+    viteReady.catch((err) => {
+      console.error('Failed to initialize Vite middleware:', err);
+      process.exit(1);
+    });
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -646,9 +669,22 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Meadowtale server listening on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    httpServer.close(() => {
+      if (viteServer) {
+        void viteServer.close().finally(() => process.exit(0));
+      } else {
+        process.exit(0);
+      }
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer().catch((err) => {

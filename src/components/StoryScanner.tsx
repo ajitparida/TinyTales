@@ -9,6 +9,7 @@ import {
   Check,
   Crop,
   FilePlus2,
+  Globe,
   Image as ImageIcon,
   ImagePlus,
   Images,
@@ -34,7 +35,7 @@ import {
   renderWatercolorStorybookStyle,
   yieldToBrowser,
 } from '../lib/watercolorFilter';
-import { getMediaDataUrl, saveMediaDataUrl } from '../lib/mediaStore';
+import { resolveStoryMediaUrl, saveStoryMedia } from '../lib/mediaStore';
 import { sanitizeId } from '../lib/firebase';
 import { PageImageFramingModal } from './PageImageFramingModal';
 
@@ -76,10 +77,12 @@ interface ReviewedPageDraft {
 interface StoryScannerProps {
   defaultAgeGroup: AgeGroup;
   isSignedIn: boolean;
+  isAdmin?: boolean;
+  isAlreadyPublished?: boolean;
   editingStory?: Story | null;
   initialCreateMode?: CreateMode;
   onCancel: () => void;
-  onSaveStory: (story: Story, isUpdate: boolean) => Promise<void>;
+  onSaveStory: (story: Story, isUpdate: boolean, publishToMainSite?: boolean) => Promise<void>;
 }
 
 const REDRAW_STYLES: { id: RedrawStyle; label: string }[] = [
@@ -449,6 +452,8 @@ async function requestAiRedrawIllustration(params: {
 export function StoryScanner({
   defaultAgeGroup,
   isSignedIn,
+  isAdmin = false,
+  isAlreadyPublished = false,
   editingStory = null,
   initialCreateMode = 'scan',
   onCancel,
@@ -456,6 +461,11 @@ export function StoryScanner({
 }: StoryScannerProps) {
   const isEditMode = Boolean(editingStory);
   const [createMode, setCreateMode] = useState<CreateMode>(initialCreateMode);
+  const [publishToMainSite, setPublishToMainSite] = useState<boolean>(isAlreadyPublished);
+
+  useEffect(() => {
+    setPublishToMainSite(isAlreadyPublished);
+  }, [isAlreadyPublished, editingStory?.id]);
 
   const [step, setStep] = useState<'capture' | 'converting' | 'review'>(
     isEditMode || initialCreateMode === 'manual' ? 'review' : 'capture'
@@ -565,7 +575,7 @@ export function StoryScanner({
           if (editingStory.coverMediaId && p.mediaId === editingStory.coverMediaId) {
             matchedCoverIdx = i;
           }
-          const savedDataUrl = p.mediaId ? await getMediaDataUrl(p.mediaId) : null;
+          const savedDataUrl = p.mediaId ? await resolveStoryMediaUrl(p.mediaId) : null;
           const mode: VisualMode =
             p.visualMode === 'redraw'
               ? 'redraw'
@@ -1856,7 +1866,7 @@ export function StoryScanner({
         let mediaId = p.existingMediaId || '';
         if (chosenImage && (p.mediaDirty || !mediaId)) {
           mediaId = sanitizeId(`media_${storyId}_p${i + 1}_${saveNonce}`);
-          await saveMediaDataUrl(mediaId, chosenImage);
+          await saveStoryMedia(storyId, mediaId, chosenImage);
         }
 
         pagesToSave.push({
@@ -1892,7 +1902,7 @@ export function StoryScanner({
         createdAtMs: editingStory?.createdAtMs ?? Date.now(),
       };
 
-      await onSaveStory(finalStory, isEditMode);
+      await onSaveStory(finalStory, isEditMode, isAdmin ? publishToMainSite : false);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to save storybook changes.');
     } finally {
@@ -3173,6 +3183,28 @@ export function StoryScanner({
               </div>
             </div>
 
+            {/* Admin Publish-to-Main-Site Toggle */}
+            {isAdmin && (
+              <label className="flex items-start gap-3 p-4 rounded-xl bg-[#2F7A5E]/6 dark:bg-[#E5A94C]/10 border border-[#2F7A5E]/25 dark:border-[#E5A94C]/25 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={publishToMainSite}
+                  onChange={(e) => setPublishToMainSite(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded accent-[#2F7A5E] dark:accent-[#E5A94C] cursor-pointer"
+                />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+                    <Globe className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+                    <span>Publish to Main Site (Admin)</span>
+                  </div>
+                  <p className="text-xs text-[#5C646B] dark:text-[#A4AEC2] mt-0.5">
+                    Make this storybook and its artwork visible on the public Meadowtale shelf for
+                    all visitors, including guests and other devices.
+                  </p>
+                </div>
+              </label>
+            )}
+
             {/* Footer Save Actions */}
             <div className="pt-5 border-t border-[#E6E1D8] dark:border-[#2A324B] flex flex-wrap items-center justify-between gap-3">
               {!isEditMode && createMode === 'scan' ? (
@@ -3207,12 +3239,18 @@ export function StoryScanner({
                   <BookPlus className="w-4 h-4" />
                 )}
                 {isSaving
-                  ? isEditMode
-                    ? 'Saving Changes...'
-                    : 'Saving Storybook...'
-                  : isEditMode
-                    ? 'Save Storybook Changes'
-                    : 'Save to Storybook Library'}
+                  ? isAdmin && publishToMainSite
+                    ? 'Saving & Publishing...'
+                    : isEditMode
+                      ? 'Saving Changes...'
+                      : 'Saving Storybook...'
+                  : isAdmin && publishToMainSite
+                    ? isEditMode
+                      ? 'Save & Update Main Site'
+                      : 'Save & Publish to Main Site'
+                    : isEditMode
+                      ? 'Save Storybook Changes'
+                      : 'Save to Storybook Library'}
               </button>
             </div>
           </div>

@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { CURATED_STORIES } from './data/curatedStories';
 import {
   auth,
+  checkIsAdminCloud,
   createChildProfileCloud,
   DEFAULT_BEDTIME_SETTINGS,
   deleteChildProfileCloud,
   deleteCustomStoryCloud,
+  deleteStoryMediaCloud,
   ensureParentAccount,
+  publishStoryCloud,
   recordReadingCompletionCloud,
   saveBedtimeSettingsCloud,
   saveCustomStoryCloud,
@@ -15,10 +18,13 @@ import {
   signOutParent,
   subscribeChildProfiles,
   subscribeCustomStories,
+  subscribePublishedStories,
   subscribeReadingLogs,
+  unpublishStoryCloud,
   updateCustomStoryCloud,
 } from './lib/firebase';
 import { setAmbientLullabyActive } from './lib/audioEngine';
+import { backfillLocalStoryMediaToCloud, publishStoryMediaToCloud } from './lib/mediaStore';
 import {
   AgeGroup,
   AppView,
@@ -85,6 +91,8 @@ function MeadowtaleApp() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [publishedStories, setPublishedStories] = useState<Story[]>([]);
 
   const [activeView, setActiveView] = useState<AppView>('library');
   const [selectedStory, setSelectedStory] = useState<Story | null>(null);
@@ -143,6 +151,34 @@ function MeadowtaleApp() {
     return () => unsub();
   }, []);
 
+  // Subscribe to admin-published main-site storybooks (visible to all visitors & incognito sessions)
+  useEffect(() => {
+    const unsubPublished = subscribePublishedStories(
+      (stories) => {
+        setPublishedStories(stories);
+      },
+      (err) => {
+        console.warn('Could not load published stories:', err);
+      }
+    );
+    return () => unsubPublished();
+  }, []);
+
+  // Resolve verified Admin role when auth state changes
+  useEffect(() => {
+    if (!authReady || !user) {
+      setIsAdmin(false);
+      return;
+    }
+    let active = true;
+    void checkIsAdminCloud(user).then((adminOk) => {
+      if (active) setIsAdmin(adminOk);
+    });
+    return () => {
+      active = false;
+    };
+  }, [authReady, user]);
+
   // Sync Firestore when parent is signed in
   useEffect(() => {
     if (!authReady || !user) return;
@@ -177,6 +213,8 @@ function MeadowtaleApp() {
         unsubStories = subscribeCustomStories(user.uid, (cloudStories) => {
           if (!active) return;
           setCustomStories(cloudStories);
+          // Backfill any pre-existing local IndexedDB illustrations so incognito & other devices show them
+          void backfillLocalStoryMediaToCloud(user.uid, cloudStories);
         });
 
         unsubLogs = subscribeReadingLogs(user.uid, (cloudLogs) => {
@@ -408,17 +446,84 @@ function MeadowtaleApp() {
     ]
   );
 
-  const handleSaveScannedStory = async (story: Story, isUpdate: boolean) => {
+  const publishedStoryIds = useMemo(
+    () => new Set(publishedStories.map((s) => s.id)),
+    [publishedStories]
+  );
+
+  // Merge admin-published stories with curated catalog (avoiding duplicates with owner's customStories)
+  const publicCatalogStories = useMemo(() => {
+    const customIds = new Set(customStories.map((s) => s.id));
+    const visiblePublished = publishedStories.filter((s) => !customIds.has(s.id));
+    return [...visiblePublished, ...CURATED_STORIES];
+  }, [publishedStories, customStories]);
+
+  const collectStoryMediaIds = (story: Story): string[] => {
+    const ids: string[] = [];
+    if (story.coverMediaId) ids.push(story.coverMediaId);
+    for (const p of story.pages) {
+      if (p.mediaId) ids.push(p.mediaId);
+    }
+    return ids;
+  };
+
+  const handlePublishCustomStory = async (story: Story) => {
+    if (!user || !isAdmin) {
+      showToast('Admin sign-in is required to publish stories to the main site.');
+      return;
+    }
+    try {
+      await publishStoryMediaToCloud(user.uid, story);
+      await publishStoryCloud(user.uid, story);
+      showToast(`Published “${story.title}” to the main site for all visitors!`);
+    } catch (err) {
+      console.error('Publish story error:', err);
+      showToast('Could not publish story to main site. Please try again.');
+    }
+  };
+
+  const handleUnpublishCustomStory = async (story: Story) => {
+    if (!user || !isAdmin) {
+      showToast('Admin sign-in is required to unpublish stories.');
+      return;
+    }
+    try {
+      await unpublishStoryCloud(story.id, collectStoryMediaIds(story));
+      showToast(`Unpublished “${story.title}” from the main site.`);
+    } catch (err) {
+      console.error('Unpublish story error:', err);
+      showToast('Could not unpublish story. Please try again.');
+    }
+  };
+
+  const handleSaveScannedStory = async (
+    story: Story,
+    isUpdate: boolean,
+    shouldPublish = false
+  ) => {
     if (isUpdate) {
       if (user) {
         await updateCustomStoryCloud(user.uid, story);
       } else {
         setCustomStories((prev) => prev.map((s) => (s.id === story.id ? story : s)));
       }
+
+      let publishSuffix = '';
+      if (user && isAdmin) {
+        if (shouldPublish) {
+          await publishStoryMediaToCloud(user.uid, story);
+          await publishStoryCloud(user.uid, story);
+          publishSuffix = ' & updated on main site';
+        } else if (publishedStoryIds.has(story.id)) {
+          await unpublishStoryCloud(story.id, collectStoryMediaIds(story));
+          publishSuffix = ' & unpublished from main site';
+        }
+      }
+
       setEditingStory(null);
       setSelectedStory(story);
       setActiveView('reader');
-      showToast(`Updated “${story.title}”!`);
+      showToast(`Updated “${story.title}”${publishSuffix}!`);
       return;
     }
 
@@ -427,10 +532,18 @@ function MeadowtaleApp() {
     } else {
       setCustomStories((prev) => [story, ...prev]);
     }
+
+    let publishSuffix = '';
+    if (user && isAdmin && shouldPublish) {
+      await publishStoryMediaToCloud(user.uid, story);
+      await publishStoryCloud(user.uid, story);
+      publishSuffix = ' & published to main site';
+    }
+
     setEditingStory(null);
     setSelectedStory(story);
     setActiveView('reader');
-    showToast(`Saved “${story.title}” to your storybook shelf!`);
+    showToast(`Saved “${story.title}”${publishSuffix}!`);
   };
 
   const handleOpenEditCustomStory = (story: Story) => {
@@ -439,8 +552,17 @@ function MeadowtaleApp() {
   };
 
   const handleDeleteCustomStory = async (story: Story) => {
+    const mediaIds = collectStoryMediaIds(story);
     if (user) {
       await deleteCustomStoryCloud(user.uid, story.id);
+      void deleteStoryMediaCloud(user.uid, mediaIds);
+      if (isAdmin && publishedStoryIds.has(story.id)) {
+        try {
+          await unpublishStoryCloud(story.id, mediaIds);
+        } catch {
+          // Ignore if already unpublished
+        }
+      }
     } else {
       setCustomStories((prev) => prev.filter((s) => s.id !== story.id));
     }
@@ -450,7 +572,7 @@ function MeadowtaleApp() {
     if (editingStory?.id === story.id) {
       setEditingStory(null);
     }
-    showToast(`Removed “${story.title}” from scanned books.`);
+    showToast(`Removed “${story.title}” from your custom books.`);
   };
 
   const activeChild =
@@ -489,8 +611,11 @@ function MeadowtaleApp() {
       <div className="flex-1">
         {activeView === 'library' && (
           <LibraryView
-            curatedStories={CURATED_STORIES}
+            curatedStories={publicCatalogStories}
             customStories={customStories}
+            cloudSyncKey={user?.uid || ''}
+            isAdmin={isAdmin}
+            publishedStoryIds={publishedStoryIds}
             childrenProfiles={childrenProfiles}
             activeChildId={activeChildId}
             readingLogs={readingLogs}
@@ -514,12 +639,15 @@ function MeadowtaleApp() {
             }}
             onEditCustomStory={handleOpenEditCustomStory}
             onDeleteCustomStory={handleDeleteCustomStory}
+            onPublishCustomStory={handlePublishCustomStory}
+            onUnpublishCustomStory={handleUnpublishCustomStory}
           />
         )}
 
         {activeView === 'reader' && selectedStory && (
           <StoryReader
             story={selectedStory}
+            cloudSyncKey={user?.uid || ''}
             bedtimeSettings={bedtimeSettings}
             voicePreferences={voicePreferences}
             onUpdateVoicePreferences={setVoicePreferences}
@@ -537,6 +665,8 @@ function MeadowtaleApp() {
             key={editingStory ? `edit_${editingStory.id}` : `create_${scannerCreateMode}`}
             defaultAgeGroup={activeChild?.ageGroup || '2-3'}
             isSignedIn={Boolean(user)}
+            isAdmin={isAdmin}
+            isAlreadyPublished={Boolean(editingStory && publishedStoryIds.has(editingStory.id))}
             editingStory={editingStory}
             initialCreateMode={scannerCreateMode}
             onCancel={() => {
@@ -560,7 +690,7 @@ function MeadowtaleApp() {
             childrenProfiles={childrenProfiles}
             activeChildId={activeChildId}
             readingLogs={readingLogs}
-            allStories={[...customStories, ...CURATED_STORIES]}
+            allStories={[...customStories, ...publicCatalogStories]}
             bedtimeSettings={bedtimeSettings}
             voicePreferences={voicePreferences}
             onUnlockGate={() => setIsParentGateUnlocked(true)}

@@ -398,6 +398,307 @@ export async function deleteCustomStoryCloud(uid: string, storyId: string): Prom
   }
 }
 
+const inflightCloudMediaReads = new Map<string, Promise<string | null>>();
+
+/**
+ * Saves or updates a compressed storybook illustration under /users/{uid}/media/{mediaId}
+ * so the same parent login shows identical custom book artwork across devices & incognito windows.
+ */
+export async function saveStoryMediaCloud(
+  uid: string,
+  storyId: string,
+  mediaId: string,
+  dataUrl: string
+): Promise<boolean> {
+  const safeMediaId = sanitizeId(mediaId);
+  const safeStoryId = sanitizeId(storyId);
+  if (!dataUrl || !dataUrl.startsWith('data:image/') || dataUrl.length > 690_000) {
+    return false;
+  }
+
+  const mimeMatch = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,/);
+  const mimeType = (mimeMatch?.[1] || 'image/jpeg') as 'image/jpeg' | 'image/png' | 'image/webp';
+  const ref = doc(db, 'users', uid, 'media', safeMediaId);
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        dataUrl,
+        mimeType,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        ownerId: uid,
+        storyId: safeStoryId,
+        dataUrl,
+        mimeType,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return true;
+  } catch (error) {
+    console.warn('Cloud media sync write skipped:', error);
+    return false;
+  }
+}
+
+/**
+ * Fetches a synced storybook illustration from /users/{uid}/media/{mediaId} with
+ * inflight request deduplication so library hero & shelf cards share a single read.
+ */
+export async function getStoryMediaCloud(uid: string, mediaId: string): Promise<string | null> {
+  const safeMediaId = sanitizeId(mediaId);
+  if (!uid || !safeMediaId) return null;
+
+  const cacheKey = `${uid}:${safeMediaId}`;
+  const inflight = inflightCloudMediaReads.get(cacheKey);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    try {
+      const snap = await getDoc(doc(db, 'users', uid, 'media', safeMediaId));
+      if (!snap.exists()) return null;
+      const data = snap.data();
+      return typeof data.dataUrl === 'string' && data.dataUrl.startsWith('data:image/')
+        ? data.dataUrl
+        : null;
+    } catch (error) {
+      console.warn('Cloud media sync read skipped:', error);
+      return null;
+    } finally {
+      inflightCloudMediaReads.delete(cacheKey);
+    }
+  })();
+
+  inflightCloudMediaReads.set(cacheKey, promise);
+  return promise;
+}
+
+/**
+ * Deletes cloud media documents associated with a deleted custom storybook.
+ */
+export async function deleteStoryMediaCloud(uid: string, mediaIds: string[]): Promise<void> {
+  const uniqueIds = Array.from(new Set(mediaIds.filter(Boolean).map((id) => sanitizeId(id))));
+  await Promise.all(
+    uniqueIds.map(async (mediaId) => {
+      try {
+        await deleteDoc(doc(db, 'users', uid, 'media', mediaId));
+      } catch {
+        // Ignore missing media docs during cleanup
+      }
+    })
+  );
+}
+
+export const ADMIN_EMAILS = new Set([
+  'ajit.parida01@gmail.com',
+  'ajitparida01@gmail.com',
+]);
+
+/**
+ * Checks whether the signed-in user has verified Admin privileges (matching the
+ * server-enforced isAdmin() predicate in firestore.rules).
+ */
+export async function checkIsAdminCloud(user: User | null): Promise<boolean> {
+  if (!user || !user.emailVerified) return false;
+  if (ADMIN_EMAILS.has((user.email || '').trim().toLowerCase())) {
+    return true;
+  }
+  try {
+    const snap = await getDoc(doc(db, 'admins', user.uid));
+    return snap.exists();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Subscribes to admin-published storybooks visible to all visitors on the main site.
+ * Uses only where('status', '==', 'published') and sorts client-side to avoid requiring
+ * a custom composite index.
+ */
+export function subscribePublishedStories(
+  onData: (stories: Story[]) => void,
+  onError?: (err: Error) => void
+) {
+  const colPath = 'publishedStories';
+  const q = query(collection(db, 'publishedStories'), where('status', '==', 'published'));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: Story[] = snapshot.docs.map((d) => {
+        const data = d.data();
+        const publishedAt = data.publishedAt as Timestamp | undefined;
+        return {
+          id: d.id,
+          title: String(data.title ?? 'Published Story'),
+          subtitle: String(data.subtitle ?? ''),
+          ageGroup: data.ageGroup === '4-5' ? '4-5' : '2-3',
+          moralTitle: String(data.moralTitle ?? 'Kindness'),
+          moralLesson: String(data.moralLesson ?? ''),
+          parentDiscussionPrompt: String(data.parentDiscussionPrompt ?? ''),
+          coverMediaId: String(data.coverMediaId ?? ''),
+          coverFallbackId: (['pond', 'forest', 'twilight', 'bridge'].includes(data.coverFallbackId)
+            ? data.coverFallbackId
+            : 'forest') as Story['coverFallbackId'],
+          readMinutes: Number(data.readMinutes ?? 2),
+          isCustom: false,
+          isPublished: true,
+          pages: Array.isArray(data.pages) ? data.pages : [],
+          createdAtMs: publishedAt?.toMillis?.() ?? 0,
+        };
+      });
+      list.sort((a, b) => (b.createdAtMs ?? 0) - (a.createdAtMs ?? 0));
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, colPath);
+      } catch (wrapped) {
+        if (onError && wrapped instanceof Error) onError(wrapped);
+      }
+    }
+  );
+}
+
+/**
+ * Publishes or updates a storybook on the public main site (/publishedStories/{storyId}).
+ * Requires verified Admin privileges enforced by Firestore rules.
+ */
+export async function publishStoryCloud(uid: string, story: Story): Promise<string> {
+  const storyId = sanitizeId(story.id || `story_${Date.now()}`);
+  const path = `publishedStories/${storyId}`;
+  const ref = doc(db, 'publishedStories', storyId);
+  const fields = buildSanitizedCustomStoryFields(story);
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        ...fields,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        publishedBy: uid,
+        status: 'published',
+        ...fields,
+        publishedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return storyId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Removes an admin-published storybook and its public artwork from the main site.
+ */
+export async function unpublishStoryCloud(
+  storyId: string,
+  mediaIds: string[] = []
+): Promise<void> {
+  const safeStoryId = sanitizeId(storyId);
+  const path = `publishedStories/${safeStoryId}`;
+  try {
+    await deleteDoc(doc(db, 'publishedStories', safeStoryId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+
+  const uniqueIds = Array.from(new Set(mediaIds.filter(Boolean).map((id) => sanitizeId(id))));
+  await Promise.all(
+    uniqueIds.map(async (mediaId) => {
+      try {
+        await deleteDoc(doc(db, 'publishedMedia', mediaId));
+      } catch {
+        // Ignore missing media docs during unpublish cleanup
+      }
+    })
+  );
+}
+
+const inflightPublishedMediaReads = new Map<string, Promise<string | null>>();
+
+/**
+ * Publishes compressed artwork for a main-site published storybook under /publishedMedia/{mediaId}.
+ */
+export async function savePublishedMediaCloud(
+  uid: string,
+  storyId: string,
+  mediaId: string,
+  dataUrl: string
+): Promise<boolean> {
+  const safeMediaId = sanitizeId(mediaId);
+  const safeStoryId = sanitizeId(storyId);
+  if (!dataUrl || !dataUrl.startsWith('data:image/') || dataUrl.length > 690_000) {
+    return false;
+  }
+
+  const mimeMatch = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,/);
+  const mimeType = (mimeMatch?.[1] || 'image/jpeg') as 'image/jpeg' | 'image/png' | 'image/webp';
+  const ref = doc(db, 'publishedMedia', safeMediaId);
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        dataUrl,
+        mimeType,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        publishedBy: uid,
+        storyId: safeStoryId,
+        dataUrl,
+        mimeType,
+        publishedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return true;
+  } catch (error) {
+    console.warn('Published media upload failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Reads public artwork for an admin-published storybook from /publishedMedia/{mediaId}.
+ */
+export async function getPublishedMediaCloud(mediaId: string): Promise<string | null> {
+  const safeMediaId = sanitizeId(mediaId);
+  if (!safeMediaId) return null;
+
+  const inflight = inflightPublishedMediaReads.get(safeMediaId);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    try {
+      const snap = await getDoc(doc(db, 'publishedMedia', safeMediaId));
+      if (!snap.exists()) return null;
+      const data = snap.data();
+      return typeof data.dataUrl === 'string' && data.dataUrl.startsWith('data:image/')
+        ? data.dataUrl
+        : null;
+    } catch (error) {
+      console.warn('Published media read skipped:', error);
+      return null;
+    } finally {
+      inflightPublishedMediaReads.delete(safeMediaId);
+    }
+  })();
+
+  inflightPublishedMediaReads.set(safeMediaId, promise);
+  return promise;
+}
+
 export function subscribeReadingLogs(
   uid: string,
   onData: (logs: ReadingLogEntry[]) => void,

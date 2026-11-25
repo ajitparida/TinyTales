@@ -40,6 +40,7 @@ export interface Story {
   coverFallbackId: BackdropId;
   readMinutes: number;
   isCustom?: boolean;
+  isPublished?: boolean;
   pages: StoryPage[];
   createdAtMs?: number;
 }

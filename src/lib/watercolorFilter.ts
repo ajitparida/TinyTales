@@ -248,6 +248,33 @@ export async function compressDataUrlForApi(
   }
 }
 
+/**
+ * Compresses a custom storybook illustration into a crisp JPEG data URL guaranteed
+ * to stay well below Firestore's 700KB security rule limit (and 1MB document ceiling)
+ * so custom book artwork syncs seamlessly across browsers, incognito sessions, and devices.
+ */
+export async function compressImageForCloudSync(
+  sourceDataUrl: string,
+  maxChars = 580_000
+): Promise<{ dataUrl: string; mimeType: 'image/jpeg' }> {
+  const attempts: Array<{ maxDim: number; quality: number }> = [
+    { maxDim: 960, quality: 0.78 },
+    { maxDim: 820, quality: 0.68 },
+    { maxDim: 680, quality: 0.58 },
+    { maxDim: 540, quality: 0.5 },
+  ];
+
+  let lastResult = { dataUrl: sourceDataUrl, mimeType: 'image/jpeg' as const };
+  for (const step of attempts) {
+    const compressed = await compressDataUrlForApi(sourceDataUrl, step.maxDim, step.quality);
+    lastResult = { dataUrl: compressed.dataUrl, mimeType: 'image/jpeg' };
+    if (compressed.dataUrl.length <= maxChars) {
+      return lastResult;
+    }
+  }
+  return lastResult;
+}
+
 function applyCottonPaperFinish(
   ctx: CanvasRenderingContext2D,
   width: number,

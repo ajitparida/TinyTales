@@ -19,6 +19,14 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'ajit.parida01@gmail.com' ||
+        request.auth.token.email == 'ajitparida01@gmail.com'
+      );
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -238,6 +246,199 @@ service cloud.firestore {
         && data.completedAt is timestamp;
     }
 
+    // Validation Blueprint: StoryMedia (owner-scoped compressed storybook artwork)
+    function isValidStoryMedia(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'storyId',
+          'dataUrl',
+          'mimeType',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'storyId',
+          'dataUrl',
+          'mimeType',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidId(data.storyId)
+        && data.dataUrl is string
+        && data.dataUrl.size() >= 20
+        && data.dataUrl.size() <= 700000
+        && data.dataUrl[0:11] == 'data:image/'
+        && data.mimeType is string
+        && (data.mimeType == 'image/jpeg' || data.mimeType == 'image/png' || data.mimeType == 'image/webp')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: PublishedStory (admin-published main-site storybook)
+    function isValidPublishedStory(data) {
+      return data.keys().hasAll([
+          'publishedBy',
+          'status',
+          'title',
+          'subtitle',
+          'ageGroup',
+          'moralTitle',
+          'moralLesson',
+          'parentDiscussionPrompt',
+          'coverMediaId',
+          'coverFallbackId',
+          'readMinutes',
+          'pages',
+          'publishedAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'publishedBy',
+          'status',
+          'title',
+          'subtitle',
+          'ageGroup',
+          'moralTitle',
+          'moralLesson',
+          'parentDiscussionPrompt',
+          'coverMediaId',
+          'coverFallbackId',
+          'readMinutes',
+          'pages',
+          'publishedAt',
+          'updatedAt'
+        ])
+        && isValidId(data.publishedBy)
+        && data.publishedBy == request.auth.uid
+        && data.status is string
+        && data.status == 'published'
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 120
+        && data.subtitle is string
+        && data.subtitle.size() <= 180
+        && data.ageGroup is string
+        && (data.ageGroup == '2-3' || data.ageGroup == '4-5')
+        && data.moralTitle is string
+        && data.moralTitle.size() >= 1
+        && data.moralTitle.size() <= 60
+        && data.moralLesson is string
+        && data.moralLesson.size() >= 1
+        && data.moralLesson.size() <= 360
+        && data.parentDiscussionPrompt is string
+        && data.parentDiscussionPrompt.size() <= 240
+        && data.coverMediaId is string
+        && data.coverMediaId.size() <= 128
+        && data.coverFallbackId is string
+        && data.coverFallbackId.size() <= 64
+        && data.readMinutes is number
+        && data.readMinutes >= 1
+        && data.readMinutes <= 30
+        && data.pages is list
+        && data.pages.size() >= 1
+        && data.pages.size() <= 10
+        && data.pages[0] is map
+        && data.publishedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: PublishedMedia (public artwork for published stories)
+    function isValidPublishedMedia(data) {
+      return data.keys().hasAll([
+          'publishedBy',
+          'storyId',
+          'dataUrl',
+          'mimeType',
+          'publishedAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'publishedBy',
+          'storyId',
+          'dataUrl',
+          'mimeType',
+          'publishedAt',
+          'updatedAt'
+        ])
+        && isValidId(data.publishedBy)
+        && data.publishedBy == request.auth.uid
+        && isValidId(data.storyId)
+        && data.dataUrl is string
+        && data.dataUrl.size() >= 20
+        && data.dataUrl.size() <= 700000
+        && data.dataUrl[0:11] == 'data:image/'
+        && data.mimeType is string
+        && (data.mimeType == 'image/jpeg' || data.mimeType == 'image/png' || data.mimeType == 'image/webp')
+        && data.publishedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Server-Managed Admin Allowlist (non-writable by clients)
+    match /admins/{userId} {
+      allow get: if isSignedIn() && isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // Public Main-Site Published Storybooks (Admin Write, Public Read)
+    match /publishedStories/{storyId} {
+      allow get: if isValidId(storyId) && resource.data.status == 'published';
+      allow list: if resource.data.status == 'published';
+      allow create: if isAdmin()
+        && isValidId(storyId)
+        && isValidPublishedStory(incoming())
+        && incoming().publishedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(storyId)
+        && isValidPublishedStory(incoming())
+        && incoming().publishedBy == existing().publishedBy
+        && incoming().publishedAt == existing().publishedAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'subtitle',
+          'ageGroup',
+          'moralTitle',
+          'moralLesson',
+          'parentDiscussionPrompt',
+          'coverMediaId',
+          'coverFallbackId',
+          'readMinutes',
+          'pages',
+          'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(storyId);
+    }
+
+    // Public Artwork for Admin-Published Storybooks (fetched strictly by known mediaId)
+    match /publishedMedia/{mediaId} {
+      allow get: if isValidId(mediaId);
+      allow list: if false;
+      allow create: if isAdmin()
+        && isValidId(mediaId)
+        && isValidPublishedMedia(incoming())
+        && incoming().publishedAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(mediaId)
+        && isValidPublishedMedia(incoming())
+        && incoming().publishedBy == existing().publishedBy
+        && incoming().storyId == existing().storyId
+        && incoming().publishedAt == existing().publishedAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'dataUrl',
+          'mimeType',
+          'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(mediaId);
+    }
+
     // Parent Account & Bedtime Settings
     match /users/{userId} {
       allow get: if isSignedIn() && isOwner(userId) && isValidId(userId);
@@ -353,6 +554,40 @@ service cloud.firestore {
           && isOwner(userId)
           && isValidId(userId)
           && isValidId(storyId)
+          && existing().ownerId == request.auth.uid;
+      }
+
+      // Synced Custom Storybook Page Artwork (fetched strictly by known mediaId)
+      match /media/{mediaId} {
+        allow get: if isSignedIn() && isOwner(userId) && isValidId(userId) && isValidId(mediaId);
+        allow list: if false;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(mediaId)
+          && isValidStoryMedia(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId);
+        allow update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(mediaId)
+          && isValidStoryMedia(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().storyId == existing().storyId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentAccountExists(userId)
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'dataUrl',
+            'mimeType',
+            'updatedAt'
+          ]);
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(mediaId)
           && existing().ownerId == request.auth.uid;
       }
 

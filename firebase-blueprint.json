@@ -257,9 +257,212 @@
         "usedBedtimeMode",
         "completedAt"
       ]
+    },
+    "StoryMedia": {
+      "title": "StoryMedia",
+      "description": "Compressed custom storybook page illustration synced to the parent's cloud account so custom book images load identically across browsers, incognito sessions, and devices.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storyId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "dataUrl": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 700000,
+          "pattern": "^data:image/"
+        },
+        "mimeType": {
+          "type": "string",
+          "enum": ["image/jpeg", "image/png", "image/webp"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "storyId",
+        "dataUrl",
+        "mimeType",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Server-managed allowlist document granting main-site publishing rights to an admin UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        }
+      },
+      "required": ["uid", "role"]
+    },
+    "PublishedStory": {
+      "title": "PublishedStory",
+      "description": "Admin-published storybook visible to all visitors on the main Meadowtale library shelf.",
+      "type": "object",
+      "properties": {
+        "publishedBy": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["published"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "ageGroup": {
+          "type": "string",
+          "enum": ["2-3", "4-5"]
+        },
+        "moralTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "moralLesson": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 360
+        },
+        "parentDiscussionPrompt": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "coverMediaId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "coverFallbackId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "readMinutes": {
+          "type": "number"
+        },
+        "pages": {
+          "type": "array",
+          "description": "Up to 10 structured story pages referencing publishedMedia IDs or curated watercolor art."
+        },
+        "publishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "publishedBy",
+        "status",
+        "title",
+        "subtitle",
+        "ageGroup",
+        "moralTitle",
+        "moralLesson",
+        "parentDiscussionPrompt",
+        "coverMediaId",
+        "coverFallbackId",
+        "readMinutes",
+        "pages",
+        "publishedAt",
+        "updatedAt"
+      ]
+    },
+    "PublishedMedia": {
+      "title": "PublishedMedia",
+      "description": "Publicly readable compressed illustration for an admin-published storybook.",
+      "type": "object",
+      "properties": {
+        "publishedBy": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storyId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "dataUrl": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 700000,
+          "pattern": "^data:image/"
+        },
+        "mimeType": {
+          "type": "string",
+          "enum": ["image/jpeg", "image/png", "image/webp"]
+        },
+        "publishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "publishedBy",
+        "storyId",
+        "dataUrl",
+        "mimeType",
+        "publishedAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
+    "/admins/{userId}": {
+      "schema": {
+        "$ref": "#/entities/AdminRole"
+      },
+      "description": "Read-only admin role assignments (non-writable by clients)"
+    },
+    "/publishedStories/{storyId}": {
+      "schema": {
+        "$ref": "#/entities/PublishedStory"
+      },
+      "description": "Public main-site storybooks published by verified admins"
+    },
+    "/publishedMedia/{mediaId}": {
+      "schema": {
+        "$ref": "#/entities/PublishedMedia"
+      },
+      "description": "Publicly readable artwork for admin-published storybooks"
+    },
     "/users/{userId}": {
       "schema": {
         "$ref": "#/entities/UserAccount"
@@ -277,6 +480,12 @@
         "$ref": "#/entities/CustomStory"
       },
       "description": "Parent-scanned custom interactive storybooks with morals"
+    },
+    "/users/{userId}/media/{mediaId}": {
+      "schema": {
+        "$ref": "#/entities/StoryMedia"
+      },
+      "description": "Owner-scoped compressed page illustrations for custom storybooks"
     },
     "/users/{userId}/readingLogs/{logId}": {
       "schema": {
