@@ -11,6 +11,7 @@ import {
   Mic,
   Moon,
   MoreHorizontal,
+  Music2,
   Pause,
   Pencil,
   Play,
@@ -23,6 +24,7 @@ import {
   Sun,
   Trash2,
   Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import {
@@ -39,7 +41,6 @@ import {
   fetchAiNarrationAudio,
   fetchCharacterVoiceAudio,
   isDeviceVoiceSupported,
-  playCharacterSound,
   preloadAiNarrationAudio,
   speakCharacterWithDeviceVoice,
   speakWithDeviceVoice,
@@ -48,6 +49,14 @@ import {
   TtsUnavailableError,
   VOICE_PERSONAS,
 } from '../lib/audioEngine';
+import {
+  playCharacterTapSound,
+  playMoralCelebrationSound,
+  playPageTurnSound,
+  playSoundEffect,
+  SoundEffectOptions,
+  STORYBOOK_SFX_PREVIEWS,
+} from '../lib/soundEffects';
 import {
   clearParentVoicesForStory,
   deleteMediaKey,
@@ -213,6 +222,7 @@ export function StoryReader({
   const [showImageResizer, setShowImageResizer] = useState(false);
   const [activeHotspot, setActiveHotspot] = useState<CharacterHotspot | null>(null);
   const [tappedHotspotIds, setTappedHotspotIds] = useState<Set<string>>(new Set());
+  const [hotspotPulse, setHotspotPulse] = useState<{ id: string; key: number } | null>(null);
   const [characterVoiceLoading, setCharacterVoiceLoading] = useState(false);
 
   // Page audio playback & follow-along highlighting
@@ -303,6 +313,43 @@ export function StoryReader({
     : 'daytime';
 
   const voiceEngine = voicePreferences.voiceEngine === 'device' ? 'device' : 'ai';
+  const sfxEnabled = voicePreferences.soundEffectsEnabled !== false;
+  const sfxVolume =
+    typeof voicePreferences.soundEffectsVolume === 'number'
+      ? voicePreferences.soundEffectsVolume
+      : 0.85;
+
+  const sfxOptions: SoundEffectOptions = useMemo(
+    () => ({
+      enabled: sfxEnabled,
+      isBedtime: bedtimeSettings.bedtimeEnabled,
+      volume: sfxVolume,
+    }),
+    [sfxEnabled, bedtimeSettings.bedtimeEnabled, sfxVolume]
+  );
+  const sfxOptionsRef = useRef<SoundEffectOptions>(sfxOptions);
+  sfxOptionsRef.current = sfxOptions;
+
+  const handleToggleSoundEffects = useCallback(() => {
+    const nextEnabled = !sfxEnabled;
+    onUpdateVoicePreferences({
+      ...voicePreferences,
+      soundEffectsEnabled: nextEnabled,
+    });
+    if (nextEnabled) {
+      playSoundEffect('chime', {
+        enabled: true,
+        isBedtime: bedtimeSettings.bedtimeEnabled,
+        volume: sfxVolume,
+      });
+    }
+  }, [
+    bedtimeSettings.bedtimeEnabled,
+    onUpdateVoicePreferences,
+    sfxEnabled,
+    sfxVolume,
+    voicePreferences,
+  ]);
 
   const activePersonaOption =
     VOICE_PERSONAS.find((v) => v.id === voicePreferences.voicePersona) || VOICE_PERSONAS[0];
@@ -468,18 +515,21 @@ export function StoryReader({
     voicePreferences.voicePersona,
   ]);
 
-  // Trigger celebratory confetti & completion callback when entering the Moral Spread
+  // Trigger celebratory confetti, fanfare & completion callback when entering the Moral Spread
   useEffect(() => {
     if (isMoralSpread) {
       setConfettiBurstKey((k) => k + 1);
-      playCharacterSound('twinkle', bedtimeSettings.bedtimeEnabled);
+      const fanfareTimer = window.setTimeout(() => {
+        playMoralCelebrationSound(sfxOptionsRef.current);
+      }, 130);
       if (!loggedCompletionRef.current) {
         loggedCompletionRef.current = true;
         const elapsedSec = Math.max(15, Math.round((Date.now() - startTimeRef.current) / 1000));
         onStoryCompleted(story, elapsedSec);
       }
+      return () => window.clearTimeout(fanfareTimer);
     }
-  }, [isMoralSpread, story, onStoryCompleted, bedtimeSettings.bedtimeEnabled]);
+  }, [isMoralSpread, story, onStoryCompleted]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -526,6 +576,7 @@ export function StoryReader({
         if (!isPreview && voicePreferences.autoRead && !isMoralSpread) {
           pendingAutoStartRef.current = true;
           autoAdvanceTimerRef.current = window.setTimeout(() => {
+            playPageTurnSound(1, sfxOptions);
             setPageDirection(1);
             setPageIndex((prev) => Math.min(totalPages, prev + 1));
           }, 1500);
@@ -555,6 +606,7 @@ export function StoryReader({
     },
     [
       isMoralSpread,
+      sfxOptions,
       startProgressTracking,
       stopAudio,
       stopCharacterAudio,
@@ -590,6 +642,7 @@ export function StoryReader({
         if (voicePreferences.autoRead && !isMoralSpread) {
           pendingAutoStartRef.current = true;
           autoAdvanceTimerRef.current = window.setTimeout(() => {
+            playPageTurnSound(1, sfxOptions);
             setPageDirection(1);
             setPageIndex((prev) => Math.min(totalPages, prev + 1));
           }, 1500);
@@ -606,6 +659,7 @@ export function StoryReader({
     bedtimeSettings.bedtimeEnabled,
     currentNarrationText,
     isMoralSpread,
+    sfxOptions,
     stopAudio,
     stopCharacterAudio,
     totalPages,
@@ -814,7 +868,8 @@ export function StoryReader({
   const handleTapHotspot = (hotspot: CharacterHotspot) => {
     setActiveHotspot(hotspot);
     setTappedHotspotIds((prev) => new Set(prev).add(hotspot.id));
-    playCharacterSound(hotspot.soundCue, bedtimeSettings.bedtimeEnabled);
+    setHotspotPulse({ id: hotspot.id, key: Date.now() });
+    playCharacterTapSound(hotspot, sfxOptions);
     void speakCharacterHotspot(hotspot);
   };
 
@@ -959,10 +1014,16 @@ export function StoryReader({
       const clamped = Math.max(0, Math.min(totalPages, nextIndex));
       if (clamped === safePageIndex) return;
       pendingAutoStartRef.current = false;
-      setPageDirection(clamped > safePageIndex ? 1 : -1);
+      const direction: 1 | -1 = clamped > safePageIndex ? 1 : -1;
+      if (clamped === 0 && isMoralSpread) {
+        playSoundEffect('bookOpen', sfxOptions);
+      } else {
+        playPageTurnSound(direction, sfxOptions);
+      }
+      setPageDirection(direction);
       setPageIndex(clamped);
     },
-    [safePageIndex, totalPages]
+    [isMoralSpread, safePageIndex, sfxOptions, totalPages]
   );
 
   // Keyboard arrow navigation for desktop & iPad hardware keyboards
@@ -1106,8 +1167,27 @@ export function StoryReader({
             </div>
           </div>
 
-          {/* Right: Bedtime Toggle + Voices Sheet + More Actions */}
+          {/* Right: Sound Effects Toggle + Bedtime Toggle + Voices Sheet + More Actions */}
           <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={handleToggleSoundEffects}
+              aria-label={sfxEnabled ? 'Mute sound effects' : 'Enable sound effects'}
+              aria-pressed={sfxEnabled}
+              title={sfxEnabled ? 'Sound effects on' : 'Sound effects muted'}
+              className={`min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center transition-colors active:scale-95 cursor-pointer ${
+                sfxEnabled
+                  ? 'bg-[#2F7A5E]/12 dark:bg-[#E5A94C]/16 text-[#2F7A5E] dark:text-[#E5A94C]'
+                  : 'text-[#5C646B] dark:text-[#A4AEC2] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] hover:text-[#24292E] dark:hover:text-[#EDE9DF]'
+              }`}
+            >
+              {sfxEnabled ? (
+                <Music2 className="w-[18px] h-[18px]" />
+              ) : (
+                <VolumeX className="w-[18px] h-[18px]" />
+              )}
+            </button>
+
             {onToggleBedtime && (
               <button
                 type="button"
@@ -1135,7 +1215,7 @@ export function StoryReader({
             <button
               type="button"
               onClick={() => setActiveSheet('voices')}
-              aria-label="Voices and reading speed"
+              aria-label="Voices and sound effects"
               className="inline-flex items-center justify-center gap-1.5 min-w-[44px] min-h-[44px] sm:px-3 rounded-xl text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] hover:text-[#24292E] dark:hover:text-[#EDE9DF] hover:bg-[#EFECE5] dark:hover:bg-[#1E263D] transition-colors active:scale-95 cursor-pointer"
             >
               <SlidersHorizontal className="w-[18px] h-[18px]" />
@@ -1286,6 +1366,15 @@ export function StoryReader({
                         {!reduced && (
                           <span className="absolute inset-0 rounded-full border-2 border-[#FFF8E7] bg-[#D98A1C]/20 animate-ring-ripple" />
                         )}
+                        {!reduced && hotspotPulse?.id === hotspot.id && (
+                          <motion.span
+                            key={hotspotPulse.key}
+                            initial={{ scale: 0.85, opacity: 0.85 }}
+                            animate={{ scale: 2.1, opacity: 0 }}
+                            transition={{ duration: 0.52, ease: 'easeOut' }}
+                            className="pointer-events-none absolute inset-0 rounded-full border-2 border-[#FFF8E7] bg-[#E5A94C]/30"
+                          />
+                        )}
                         <span
                           className={`relative z-10 w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border-2 border-white shadow-md transition-transform group-hover:scale-110 ${
                             isSelected
@@ -1327,7 +1416,11 @@ export function StoryReader({
                             <button
                               type="button"
                               disabled={characterVoiceLoading}
-                              onClick={() => void speakCharacterHotspot(activeHotspot)}
+                              onClick={() => {
+                                setHotspotPulse({ id: activeHotspot.id, key: Date.now() });
+                                playCharacterTapSound(activeHotspot, sfxOptions);
+                                void speakCharacterHotspot(activeHotspot);
+                              }}
                               className="mt-2 inline-flex items-center gap-1.5 min-h-[36px] text-xs font-semibold text-[#2F7A5E] dark:text-[#5CA49B] hover:underline disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
                             >
                               {characterVoiceLoading ? (
@@ -1672,7 +1765,7 @@ export function StoryReader({
                       type="button"
                       onClick={() => {
                         setConfettiBurstKey((k) => k + 1);
-                        playCharacterSound('twinkle', bedtimeSettings.bedtimeEnabled);
+                        playMoralCelebrationSound(sfxOptions);
                       }}
                       className="inline-flex items-center gap-2 min-h-[36px] text-xs font-semibold text-[#D98A1C] dark:text-[#E5A94C] mb-2 hover:opacity-85 transition-opacity cursor-pointer"
                       title="Tap to celebrate again"
@@ -1821,12 +1914,12 @@ export function StoryReader({
         </AnimatePresence>
       </div>
 
-      {/* Native Bottom Sheet: Voices & Reading Speed */}
+      {/* Native Bottom Sheet: Voices, Speed & Sound Effects */}
       <BottomSheet
         open={activeSheet === 'voices'}
         onClose={() => setActiveSheet(null)}
-        title="Voices & Reading Speed"
-        subtitle="Customize storytelling voice, pace, and automatic page turning"
+        title="Voices & Sound Effects"
+        subtitle="Customize storytelling voice, pace, and interactive sound effects"
         reducedMotion={reduced}
       >
         <div>
@@ -1959,6 +2052,100 @@ export function StoryReader({
             {voicePreferences.autoRead ? 'On' : 'Off'}
           </span>
         </button>
+
+        {/* Interactive Story Sound Effects Controls & Preview Soundboard */}
+        <div className="space-y-3 pt-2 border-t border-[#E6E1D8] dark:border-[#2A324B]">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={sfxEnabled}
+            onClick={handleToggleSoundEffects}
+            className="w-full min-h-[52px] px-4 py-3 rounded-xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3 cursor-pointer"
+          >
+            <div className="text-left">
+              <div className="text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+                Story Sound Effects
+              </div>
+              <div className="text-xs text-[#5C646B] dark:text-[#A4AEC2]">
+                Cotton-paper page turns &amp; playful character sounds
+              </div>
+            </div>
+            <span
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold shrink-0 ${
+                sfxEnabled
+                  ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                  : 'bg-[#EFECE5] dark:bg-[#232B42] text-[#5C646B] dark:text-[#A4AEC2]'
+              }`}
+            >
+              {sfxEnabled ? 'On' : 'Off'}
+            </span>
+          </button>
+
+          {sfxEnabled && (
+            <div className="space-y-3">
+              <div>
+                <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+                  Sound Effects Level
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { value: 0.45, label: 'Soft' },
+                      { value: 0.85, label: 'Normal' },
+                      { value: 1.0, label: 'Lively' },
+                    ] as const
+                  ).map((lvl) => {
+                    const selected = Math.abs(sfxVolume - lvl.value) < 0.1;
+                    return (
+                      <button
+                        key={lvl.label}
+                        type="button"
+                        onClick={() => {
+                          onUpdateVoicePreferences({
+                            ...voicePreferences,
+                            soundEffectsEnabled: true,
+                            soundEffectsVolume: lvl.value,
+                          });
+                          playSoundEffect('chime', {
+                            enabled: true,
+                            isBedtime: bedtimeSettings.bedtimeEnabled,
+                            volume: lvl.value,
+                          });
+                        }}
+                        className={`min-h-[42px] py-2 px-2 rounded-xl text-xs font-semibold transition-colors active:scale-[0.98] cursor-pointer ${
+                          selected
+                            ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                            : 'bg-white dark:bg-[#121624] text-[#5C646B] dark:text-[#A4AEC2] border border-[#E6E1D8] dark:border-[#2A324B]'
+                        }`}
+                      >
+                        {lvl.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-semibold text-[#5C646B] dark:text-[#A4AEC2] mb-2">
+                  Preview Storybook Sounds
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {STORYBOOK_SFX_PREVIEWS.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => playSoundEffect(item.id, sfxOptions)}
+                      className="min-h-[40px] px-2.5 py-2 rounded-xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] hover:border-[#2F7A5E] dark:hover:border-[#E5A94C] text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF] inline-flex items-center justify-center gap-1.5 transition-colors active:scale-[0.97] cursor-pointer"
+                    >
+                      <Music2 className="w-3.5 h-3.5 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </BottomSheet>
 
       {/* Native Bottom Sheet: Parent Voice Studio */}
@@ -2140,7 +2327,33 @@ export function StoryReader({
             className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
           >
             <SlidersHorizontal className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
-            <span>Voices & Reading Speed</span>
+            <span>Voices &amp; Sound Effects</span>
+          </button>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={sfxEnabled}
+            onClick={handleToggleSoundEffects}
+            className="w-full min-h-[52px] px-4 py-3 rounded-2xl bg-white dark:bg-[#121624] border border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3 text-left text-sm font-semibold text-[#24292E] dark:text-[#EDE9DF] active:scale-[0.99] cursor-pointer"
+          >
+            <span className="inline-flex items-center gap-3">
+              {sfxEnabled ? (
+                <Music2 className="w-4 h-4 text-[#2F7A5E] dark:text-[#E5A94C] shrink-0" />
+              ) : (
+                <VolumeX className="w-4 h-4 text-[#5C646B] dark:text-[#A4AEC2] shrink-0" />
+              )}
+              <span>Story Sound Effects</span>
+            </span>
+            <span
+              className={`px-2.5 py-0.5 rounded-lg text-xs font-semibold ${
+                sfxEnabled
+                  ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                  : 'bg-[#EFECE5] dark:bg-[#232B42] text-[#5C646B] dark:text-[#A4AEC2]'
+              }`}
+            >
+              {sfxEnabled ? 'On' : 'Off'}
+            </span>
           </button>
 
           <button

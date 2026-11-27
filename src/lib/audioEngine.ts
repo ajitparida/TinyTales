@@ -5,6 +5,7 @@ import {
   saveMediaDataUrl,
   ttsCacheKey,
 } from './mediaStore';
+import { playSoundEffect } from './soundEffects';
 
 export interface VoicePersonaOption {
   id: VoicePersonaId;
@@ -263,64 +264,7 @@ export function playCharacterSound(
   cue: 'splash' | 'chime' | 'giggle' | 'chirp' | 'twinkle',
   isBedtime = false
 ): void {
-  try {
-    const ctx = getAudioContext();
-    const now = ctx.currentTime;
-    const masterVolume = isBedtime ? 0.08 : 0.16;
-
-    const playTone = (
-      freq: number,
-      startOffset: number,
-      duration: number,
-      type: OscillatorType = 'sine',
-      endFreq?: number
-    ) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = type;
-      osc.frequency.setValueAtTime(freq, now + startOffset);
-      if (endFreq) {
-        osc.frequency.exponentialRampToValueAtTime(endFreq, now + startOffset + duration);
-      }
-      gain.gain.setValueAtTime(0.001, now + startOffset);
-      gain.gain.linearRampToValueAtTime(masterVolume, now + startOffset + 0.025);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + startOffset + duration);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now + startOffset);
-      osc.stop(now + startOffset + duration + 0.02);
-    };
-
-    switch (cue) {
-      case 'splash':
-        playTone(320, 0, 0.14, 'sine', 520);
-        playTone(460, 0.09, 0.18, 'triangle', 680);
-        playTone(620, 0.18, 0.22, 'sine', 840);
-        break;
-      case 'chirp':
-        playTone(760, 0, 0.11, 'sine', 1080);
-        playTone(880, 0.13, 0.14, 'sine', 1240);
-        break;
-      case 'giggle':
-        playTone(440, 0, 0.1, 'triangle', 550);
-        playTone(540, 0.11, 0.1, 'triangle', 660);
-        playTone(660, 0.22, 0.15, 'triangle', 780);
-        break;
-      case 'twinkle':
-        playTone(587.33, 0, 0.35, 'sine');
-        playTone(880, 0.12, 0.4, 'sine');
-        playTone(1174.66, 0.24, 0.45, 'sine');
-        break;
-      case 'chime':
-      default:
-        playTone(523.25, 0, 0.32, 'sine');
-        playTone(659.25, 0.1, 0.36, 'sine');
-        playTone(783.99, 0.2, 0.42, 'sine');
-        break;
-    }
-  } catch {
-    // AudioContext blocked until gesture
-  }
+  playSoundEffect(cue, { enabled: true, isBedtime });
 }
 
 /**

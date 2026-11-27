@@ -11,17 +11,17 @@ export type ImageProgressCallback = (percent: number) => void;
 /** Normalized [ymin, xmin, ymax, xmax] bounding box in 0..1000 coordinates. */
 export type ArtCropBox = [number, number, number, number];
 
-/** Lightweight resolution & JPEG quality tuned for fast, reliable free-tier OCR scanning (~55% smaller). */
-export const SCAN_API_MAX_DIM = 768;
-export const SCAN_API_QUALITY = 0.6;
+/** Sharp resolution & JPEG quality tuned for accurate free-tier OCR scanning (keeps small print & tall screenshots readable). */
+export const SCAN_API_MAX_DIM = 1280;
+export const SCAN_API_QUALITY = 0.82;
 
-/** Compact thumbnail sent as style reference for optional on-demand AI illustration. */
-export const REDRAW_REF_MAX_DIM = 512;
-export const REDRAW_REF_QUALITY = 0.55;
+/** Crisp reference thumbnail sent for on-demand AI illustration redraws. */
+export const REDRAW_REF_MAX_DIM = 768;
+export const REDRAW_REF_QUALITY = 0.72;
 
 /** Crisp local display resolution kept in browser memory for framing & watercolor retouch. */
-export const LOCAL_DISPLAY_MAX_DIM = 1120;
-export const LOCAL_DISPLAY_QUALITY = 0.84;
+export const LOCAL_DISPLAY_MAX_DIM = 1280;
+export const LOCAL_DISPLAY_QUALITY = 0.86;
 
 /**
  * Yields control back to the browser so React state updates (progress bars, spinners)
@@ -239,9 +239,16 @@ export async function compressDataUrlForApi(
     );
     await yieldToBrowser();
 
-    const scale = Math.min(1, maxDimension / Math.max(img.width || 1, img.height || 1));
-    const width = Math.max(1, Math.round(img.width * scale));
-    const height = Math.max(1, Math.round(img.height * scale));
+    const rawW = img.naturalWidth || img.width || 1;
+    const rawH = img.naturalHeight || img.height || 1;
+    const aspectRatio = Math.max(rawW / rawH, rawH / rawW);
+    // For tall phone screenshots or wide two-page spreads, allow a slightly taller/wider long edge
+    // so printed text columns aren't crushed below readable OCR width.
+    const effectiveMaxDim =
+      aspectRatio > 1.6 ? Math.round(maxDimension * 1.35) : maxDimension;
+    const scale = Math.min(1, effectiveMaxDim / Math.max(rawW, rawH));
+    const width = Math.max(1, Math.round(rawW * scale));
+    const height = Math.max(1, Math.round(rawH * scale));
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -251,6 +258,8 @@ export async function compressDataUrlForApi(
 
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, width, height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, width, height);
 
     const dataUrl = await canvasToDataUrlAsync(canvas, 'image/jpeg', quality);
@@ -393,13 +402,39 @@ export async function renderWatercolorStorybookStyle(
 /**
  * Rasterizes a sanitized AI-redrawn SVG illustration onto a crisp 4:3 watercolor canvas
  * with cold-press paper texture and warm storybook finishing.
+ * Includes XML entity repair, Blob + Data-URI fallback, and explicit decode() for iOS Safari reliability.
  */
 export async function renderRedrawnSvgToWatercolorCanvas(svgMarkup: string): Promise<string> {
-  const blob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
-  const blobUrl = URL.createObjectURL(blob);
+  // Normalize any stray unescaped ampersands or XML comments that can cause Safari/Chrome SVG parse failure
+  const cleanSvg = svgMarkup
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)/g, '&amp;')
+    .trim();
+
+  if (typeof DOMParser !== 'undefined') {
+    const parsedDoc = new DOMParser().parseFromString(cleanSvg, 'image/svg+xml');
+    if (parsedDoc.querySelector('parsererror')) {
+      throw new Error('The generated illustration had malformed SVG syntax. Please tap Retry.');
+    }
+  }
+
+  let img: HTMLImageElement | null = null;
+  let blobUrl: string | null = null;
 
   try {
-    const img = await loadImageElement(blobUrl, 'Could not render redrawn illustration.');
+    try {
+      const blob = new Blob([cleanSvg], { type: 'image/svg+xml;charset=utf-8' });
+      blobUrl = URL.createObjectURL(blob);
+      img = await loadImageElement(blobUrl, 'Could not load SVG blob.');
+    } catch {
+      // Fallback to encoded data URI (more reliable on some mobile WebViews & iOS Safari)
+      const dataUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`;
+      img = await loadImageElement(dataUri, 'Could not render redrawn illustration.');
+    }
+
+    if (typeof img.decode === 'function') {
+      await img.decode().catch(() => undefined);
+    }
     await yieldToBrowser();
 
     const width = 1080;
@@ -422,8 +457,12 @@ export async function renderRedrawnSvgToWatercolorCanvas(svgMarkup: string): Pro
     // Soft atmospheric watercolor bloom pass
     ctx.save();
     ctx.globalCompositeOperation = 'soft-light';
-    ctx.globalAlpha = 0.2;
-    ctx.filter = 'blur(3px) saturate(1.18)';
+    ctx.globalAlpha = 0.18;
+    try {
+      ctx.filter = 'blur(3px) saturate(1.18)';
+    } catch {
+      // Ignore if canvas filter isn't supported in the host browser
+    }
     ctx.drawImage(img, 0, 0, width, height);
     ctx.restore();
 
@@ -432,7 +471,7 @@ export async function renderRedrawnSvgToWatercolorCanvas(svgMarkup: string): Pro
     await yieldToBrowser();
     return await canvasToDataUrlAsync(canvas, 'image/jpeg', 0.9);
   } finally {
-    URL.revokeObjectURL(blobUrl);
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
   }
 }
 
@@ -522,8 +561,8 @@ export function sanitizeArtCropBox(raw: unknown): ArtCropBox | null {
   const boxH = ymax - ymin;
   const areaFraction = (boxW * boxH) / 1_000_000;
 
-  // Ignore boxes that are too tiny (< 12% of photo) or already full-frame (> 90% of photo)
-  if (boxW < 220 || boxH < 200 || areaFraction < 0.12 || areaFraction > 0.9) {
+  // Ignore boxes that are too tiny (< 8% of photo) or already full-frame (> 94% of photo)
+  if (boxW < 180 || boxH < 160 || areaFraction < 0.08 || areaFraction > 0.94) {
     return null;
   }
 

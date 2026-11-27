@@ -96,6 +96,8 @@ export interface VoicePreferences {
   voicePersona: VoicePersonaId;
   readingSpeed: ReadingSpeed;
   autoRead: boolean;
+  soundEffectsEnabled?: boolean;
+  soundEffectsVolume?: number;
 }
 
 export type AppView = 'library' | 'reader' | 'scanner' | 'parents';

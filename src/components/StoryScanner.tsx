@@ -63,8 +63,21 @@ type CreateMode = 'scan' | 'manual';
 
 const MAX_STORY_PAGES = 10;
 const MAX_UPLOAD_BATCH = 6;
-const SCAN_TIMEOUT_MS = 45_000;
-const REDRAW_TIMEOUT_MS = 40_000;
+const SCAN_TIMEOUT_MS = 60_000;
+const REDRAW_TIMEOUT_MS = 50_000;
+
+/** Accepts image files even when mobile browsers (iOS/Android) omit file.type on camera/gallery uploads. */
+function isLikelyImageFile(file: File): boolean {
+  if (file.type && file.type.toLowerCase().startsWith('image/')) return true;
+  return /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i.test(file.name || '');
+}
+
+/** Keeps 1-2 photo scans razor-sharp while keeping 3-6 photo batches safely under Vercel's 4.5MB API body cap. */
+function getAdaptiveScanUploadParams(photoCount: number): { maxDim: number; quality: number } {
+  if (photoCount <= 2) return { maxDim: SCAN_API_MAX_DIM, quality: SCAN_API_QUALITY };
+  if (photoCount <= 4) return { maxDim: 1120, quality: 0.76 };
+  return { maxDim: 960, quality: 0.72 };
+}
 
 interface CapturedPageDraft {
   id: string;
@@ -700,7 +713,11 @@ export function StoryScanner({
           if (editingStory.coverMediaId && p.mediaId === editingStory.coverMediaId) {
             matchedCoverIdx = i;
           }
-          const savedDataUrl = p.mediaId ? await resolveStoryMediaUrl(p.mediaId) : null;
+          const savedDataUrl = p.mediaId
+            ? await resolveStoryMediaUrl(p.mediaId, {
+                preferPublished: Boolean(editingStory.isPublished),
+              })
+            : null;
           const sceneBackdrop = normalizeBackdropId(
             p.fallbackArtId || editingStory.coverFallbackId,
             'meadow'
@@ -841,7 +858,7 @@ export function StoryScanner({
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setErrorMsg(null);
-    const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
+    const files = Array.from(e.target.files || []).filter(isLikelyImageFile);
     e.target.value = '';
     if (files.length === 0) return;
 
@@ -949,10 +966,11 @@ export function StoryScanner({
     );
 
     try {
+      const refImage = target.smartFramedUrl || target.originalDataUrl;
       const result = await requestAiRedrawIllustration({
-        imageBase64: target.originalDataUrl,
-        mimeType: target.mimeType,
-        includePhotoRef: target.hasIllustration !== false,
+        imageBase64: refImage,
+        mimeType: target.mimeType || (refImage?.startsWith('data:image/png') ? 'image/png' : 'image/jpeg'),
+        includePhotoRef: target.hasIllustration !== false && Boolean(refImage),
         sceneSummary: target.sceneSummary,
         pageText: target.text,
         artStyle: chosenStyle,
@@ -1253,7 +1271,7 @@ export function StoryScanner({
     const file = e.target.files?.[0];
     const targetPageId = replaceTargetPageIdRef.current;
     e.target.value = '';
-    if (!file || !targetPageId || !file.type.startsWith('image/')) return;
+    if (!file || !targetPageId || !isLikelyImageFile(file)) return;
 
     setReplacingPageId(targetPageId);
     setReplacingPageProgress({
@@ -1604,7 +1622,7 @@ export function StoryScanner({
    * filling pages that don't have images yet and creating new pages up to MAX_STORY_PAGES.
    */
   const handleBulkUploadManualImages = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
+    const files = Array.from(e.target.files || []).filter(isLikelyImageFile);
     e.target.value = '';
     if (files.length === 0) return;
 
@@ -1727,7 +1745,7 @@ export function StoryScanner({
    * using a single fast free-tier scan call (no blocking AI redraw loop).
    */
   const handleImportExtraPhotos = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'));
+    const files = Array.from(e.target.files || []).filter(isLikelyImageFile);
     e.target.value = '';
     if (files.length === 0) return;
 
@@ -1767,10 +1785,11 @@ export function StoryScanner({
       setExtraImportStatus(`Reading story text from ${batchFiles.length} photo(s)...`);
       await yieldToBrowser();
 
+      const scanParams = getAdaptiveScanUploadParams(prepared.length);
       const compactPagesForApi = [];
       for (const p of prepared) {
         compactPagesForApi.push(
-          await compressDataUrlForApi(p.dataUrl, SCAN_API_MAX_DIM, SCAN_API_QUALITY)
+          await compressDataUrlForApi(p.dataUrl, scanParams.maxDim, scanParams.quality)
         );
       }
 
@@ -1796,6 +1815,7 @@ export function StoryScanner({
         : [];
       const baseIndex = reviewedPages.length;
       const watercolorBySource = new Map<number, string>();
+      const smartFrameByKey = new Map<string, string>();
       const appended: ReviewedPageDraft[] = [];
 
       for (let i = 0; i < apiPages.length; i++) {
@@ -1818,11 +1838,24 @@ export function StoryScanner({
 
         const useSceneMode = extraUseScenes || !hasIllustration;
         let watercolorUrl: string | null = null;
+        let smartFramedUrl: string | null = null;
+        let autoSmartFramed = false;
+
         if (!useSceneMode) {
-          watercolorUrl = watercolorBySource.get(srcIdx) || null;
-          if (!watercolorUrl) {
-            watercolorUrl = await renderWatercolorStorybookStyle(src.dataUrl);
-            watercolorBySource.set(srcIdx, watercolorUrl);
+          if (artCropBox) {
+            const cropKey = `${srcIdx}:${artCropBox.join(',')}`;
+            smartFramedUrl = smartFrameByKey.get(cropKey) || null;
+            if (!smartFramedUrl) {
+              smartFramedUrl = await renderSmartFramedArt(src.dataUrl, artCropBox, true);
+              smartFrameByKey.set(cropKey, smartFramedUrl);
+            }
+            autoSmartFramed = true;
+          } else {
+            watercolorUrl = watercolorBySource.get(srcIdx) || null;
+            if (!watercolorUrl) {
+              watercolorUrl = await renderWatercolorStorybookStyle(src.dataUrl);
+              watercolorBySource.set(srcIdx, watercolorUrl);
+            }
           }
         }
 
@@ -1867,8 +1900,8 @@ export function StoryScanner({
           framedOverrideUrl: null,
           hasIllustration,
           artCropBox,
-          smartFramedUrl: null,
-          isSmartFramed: false,
+          smartFramedUrl,
+          isSmartFramed: autoSmartFramed,
           hotspots,
         });
       }
@@ -1919,7 +1952,8 @@ export function StoryScanner({
     await yieldToBrowser();
 
     try {
-      // Lightweight 768px / 0.60 JPEG payload cuts upload size & vision tokens by ~55%
+      // Adaptive crisp JPEG payload keeps text sharp for OCR while staying safely below Vercel's 4.5MB API limit
+      const scanParams = getAdaptiveScanUploadParams(capturedPages.length);
       const compactPagesForApi = [];
       for (let i = 0; i < capturedPages.length; i++) {
         if (controller.signal.aborted) {
@@ -1928,8 +1962,8 @@ export function StoryScanner({
         compactPagesForApi.push(
           await compressDataUrlForApi(
             capturedPages[i].originalDataUrl,
-            SCAN_API_MAX_DIM,
-            SCAN_API_QUALITY
+            scanParams.maxDim,
+            scanParams.quality
           )
         );
         setConversionProgress(10 + Math.round(((i + 1) / capturedPages.length) * 18));
@@ -1984,10 +2018,12 @@ export function StoryScanner({
               hotspots: [],
             }));
 
-      // Cache watercolor retouch per unique source photo so split pages compute at most once
+      // Cache watercolor retouch & extracted smart-framed artwork per unique source photo
       const watercolorBySource = new Map<number, string>();
+      const smartFrameByKey = new Map<string, string>();
       const builtReviewed: ReviewedPageDraft[] = [];
       let autoMatchedSceneCount = 0;
+      let autoExtractedArtCount = 0;
 
       for (let i = 0; i < apiPages.length; i++) {
         const aiPage = apiPages[i] || {};
@@ -2023,7 +2059,25 @@ export function StoryScanner({
         }
 
         let watercolorUrl: string | null = watercolorBySource.get(sourceIdx) || cap.watercolorDataUrl;
-        if (resolvedVisualMode === 'watercolor' && !watercolorUrl) {
+        let smartFramedUrl: string | null = null;
+        let autoSmartFramed = false;
+
+        // Automatically extract the illustration region when detected alongside printed text margins
+        if (artCropBox && (resolvedVisualMode === 'watercolor' || resolvedVisualMode === 'photo')) {
+          const applyWatercolor = resolvedVisualMode === 'watercolor';
+          const cropKey = `${sourceIdx}:${applyWatercolor ? 'wc' : 'raw'}:${artCropBox.join(',')}`;
+          smartFramedUrl = smartFrameByKey.get(cropKey) || null;
+          if (!smartFramedUrl) {
+            smartFramedUrl = await renderSmartFramedArt(
+              cap.originalDataUrl,
+              artCropBox,
+              applyWatercolor
+            );
+            smartFrameByKey.set(cropKey, smartFramedUrl);
+          }
+          autoSmartFramed = true;
+          autoExtractedArtCount++;
+        } else if (resolvedVisualMode === 'watercolor' && !watercolorUrl) {
           watercolorUrl = await renderWatercolorStorybookStyle(cap.originalDataUrl);
           watercolorBySource.set(sourceIdx, watercolorUrl);
         }
@@ -2072,8 +2126,8 @@ export function StoryScanner({
           framedOverrideUrl: null,
           hasIllustration,
           artCropBox,
-          smartFramedUrl: null,
-          isSmartFramed: false,
+          smartFramedUrl,
+          isSmartFramed: autoSmartFramed,
           hotspots,
         });
       }
@@ -2097,11 +2151,17 @@ export function StoryScanner({
       setCoverPageIndex(0);
       setReviewedPages(builtReviewed);
 
-      if (autoMatchedSceneCount > 0) {
+      if (autoExtractedArtCount > 0) {
+        setStudioBanner(
+          `Read story text and extracted clean artwork across ${builtReviewed.length} ${
+            builtReviewed.length === 1 ? 'page' : 'pages'
+          }! You can toggle Full Photo, Resize & Crop, pick a Painterly Scene, or tap "Paint AI Art" on any page.`
+        );
+      } else if (autoMatchedSceneCount > 0) {
         setStudioBanner(
           `Scanned ${builtReviewed.length} ${
             builtReviewed.length === 1 ? 'page' : 'pages'
-          } in one fast pass! Text-only pages were paired with built-in watercolor scenes — switch scenes, use your photo, or paint custom AI art on any page.`
+          }! Text-only pages were paired with built-in watercolor scenes — switch scenes, use your photo, or paint custom AI art on any page.`
         );
       } else if (builtReviewed.length > capturedPages.length) {
         setStudioBanner(
@@ -2292,21 +2352,32 @@ export function StoryScanner({
       {errorMsg && (
         <div className="mb-6 p-4 rounded-xl bg-[#C84B58]/10 border border-[#C84B58]/30 text-sm text-[#9C2F3B] dark:text-[#F299A3] flex flex-wrap items-center justify-between gap-3">
           <span className="flex-1 min-w-[220px]">{errorMsg}</span>
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             {!isEditMode && step === 'capture' && capturedPages.length > 0 && (
-              <button
-                type="button"
-                disabled={isLoadingManualPhotos}
-                onClick={() => void handleContinueManuallyWithCapturedPhotos()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-              >
-                {isLoadingManualPhotos ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <PenLine className="w-3.5 h-3.5" />
-                )}
-                {isLoadingManualPhotos ? 'Preparing Studio...' : 'Continue Manually with These Photos'}
-              </button>
+              <>
+                <button
+                  type="button"
+                  disabled={isLoadingManualPhotos}
+                  onClick={() => void handleConvertPages()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[#C84B58]/40 bg-white dark:bg-[#1A2033] hover:bg-[#C84B58]/10 text-[#9C2F3B] dark:text-[#F299A3] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Retry Scan
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoadingManualPhotos}
+                  onClick={() => void handleContinueManuallyWithCapturedPhotos()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#2F7A5E] hover:bg-[#25644C] dark:bg-[#E5A94C] dark:hover:bg-[#D69738] text-white dark:text-[#121624] text-xs font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isLoadingManualPhotos ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <PenLine className="w-3.5 h-3.5" />
+                  )}
+                  {isLoadingManualPhotos ? 'Preparing Studio...' : 'Continue Manually with These Photos'}
+                </button>
+              </>
             )}
             <button
               type="button"

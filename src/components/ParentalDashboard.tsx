@@ -896,6 +896,35 @@ export function ParentalDashboard({
                 ))}
               </div>
             </div>
+
+            <div className="pt-3 border-t border-[#E6E1D8] dark:border-[#2A324B] flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#24292E] dark:text-[#EDE9DF]">
+                  Story Sound Effects
+                </div>
+                <div className="text-[11px] text-[#5C646B] dark:text-[#A4AEC2]">
+                  Page-turn paper rustles &amp; playful character tap sounds
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={voicePreferences.soundEffectsEnabled !== false}
+                onClick={() =>
+                  onUpdateVoicePreferences({
+                    ...voicePreferences,
+                    soundEffectsEnabled: voicePreferences.soundEffectsEnabled === false,
+                  })
+                }
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  voicePreferences.soundEffectsEnabled !== false
+                    ? 'bg-[#2F7A5E] dark:bg-[#E5A94C] text-white dark:text-[#121624]'
+                    : 'bg-[#F3EFE8] dark:bg-[#232B42] text-[#5C646B] dark:text-[#A4AEC2]'
+                }`}
+              >
+                {voicePreferences.soundEffectsEnabled !== false ? 'On' : 'Off'}
+              </button>
+            </div>
           </div>
 
           {/* Saved Parent Voice Clips & Clear Controls */}

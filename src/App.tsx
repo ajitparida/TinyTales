@@ -68,6 +68,8 @@ const DEFAULT_VOICE_PREFERENCES: VoicePreferences = {
   voicePersona: 'warm',
   readingSpeed: 1,
   autoRead: false,
+  soundEffectsEnabled: true,
+  soundEffectsVolume: 0.85,
 };
 
 const DEFAULT_GUEST_CHILDREN: ChildProfile[] = [
@@ -107,6 +109,7 @@ function MeadowtaleApp() {
   const [authLoading, setAuthLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [publishedStories, setPublishedStories] = useState<Story[]>([]);
+  const [mediaSyncVersion, setMediaSyncVersion] = useState(0);
 
   const [activeView, setActiveView] = useState<AppView>('library');
   const [navTransition, setNavTransition] = useState<NavTransitionType>('tab-forward');
@@ -274,7 +277,11 @@ function MeadowtaleApp() {
           if (!active) return;
           setCustomStories(cloudStories);
           // Backfill any pre-existing local IndexedDB illustrations so incognito & other devices show them
-          void backfillLocalStoryMediaToCloud(user.uid, cloudStories);
+          void backfillLocalStoryMediaToCloud(user.uid, cloudStories).then((uploaded) => {
+            if (active && uploaded > 0) {
+              setMediaSyncVersion((v) => v + 1);
+            }
+          });
         });
 
         unsubLogs = subscribeReadingLogs(user.uid, (cloudLogs) => {
@@ -743,7 +750,7 @@ function MeadowtaleApp() {
                 <LibraryView
                   curatedStories={publicCatalogStories}
                   customStories={customStories}
-                  cloudSyncKey={user?.uid || ''}
+                  cloudSyncKey={`${user?.uid || ''}:${mediaSyncVersion}`}
                   isAdmin={isAdmin}
                   publishedStoryIds={publishedStoryIds}
                   childrenProfiles={childrenProfiles}
@@ -777,7 +784,7 @@ function MeadowtaleApp() {
               {activeView === 'reader' && selectedStory && (
                 <StoryReader
                   story={selectedStory}
-                  cloudSyncKey={user?.uid || ''}
+                  cloudSyncKey={`${user?.uid || ''}:${mediaSyncVersion}`}
                   bedtimeSettings={bedtimeSettings}
                   voicePreferences={voicePreferences}
                   onUpdateVoicePreferences={setVoicePreferences}
